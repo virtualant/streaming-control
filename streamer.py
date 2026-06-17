@@ -20,9 +20,10 @@ VIDEOS_DIR    = BASE_DIR / "videos"
 BACKGROUND    = BASE_DIR / "background.mp4"
 PID_FILE      = BASE_DIR / ".streamer.pid"
 LOG_FILE      = BASE_DIR / "streamer.log"
-OVERLAY_DIR     = BASE_DIR / ".overlay"
-OVERLAY_SLOTS   = 6  # header + 5 schedule lines
-PICTURE_OVERLAY = BASE_DIR / "picture-overlay"
+OVERLAY_DIR         = BASE_DIR / ".overlay"
+OVERLAY_SLOTS       = 6  # header + 5 schedule lines
+PICTURE_OVERLAY     = BASE_DIR / "picture-overlay"
+SELECTED_IMAGE_FILE = BASE_DIR / ".selected_image"
 
 DEFAULT_CONFIG = {
     "youtube_rtmp": "rtmp://a.rtmp.youtube.com/live2",
@@ -186,14 +187,25 @@ def write_overlay_files(schedule):
         (OVERLAY_DIR / f"line{i}.txt").write_text(text)
 
 def get_picture_overlay():
-    """Return the first image (PNG/JPG) found in picture-overlay/, or None."""
+    """Return the selected image from picture-overlay/, or None."""
     if not PICTURE_OVERLAY.exists():
         return None
-    images = sorted([
+    if SELECTED_IMAGE_FILE.exists():
+        name = SELECTED_IMAGE_FILE.read_text().strip()
+        if name == "off":
+            return None
+        path = PICTURE_OVERLAY / name
+        if path.exists():
+            return path
+    return None
+
+def list_overlay_images():
+    if not PICTURE_OVERLAY.exists():
+        return []
+    return sorted([
         p for ext in ("*.png", "*.jpg", "*.jpeg")
         for p in PICTURE_OVERLAY.glob(ext)
     ])
-    return images[0] if images else None
 
 def _drawtext_file(slot, x, y, size=30, color="white@0.85"):
     path = str(OVERLAY_DIR / f"line{slot}.txt").replace("\\", "/").replace(":", "\\:")
@@ -363,6 +375,7 @@ class Streamer:
         self.mode = None          # "idle" | "video"
         self.playing_key = None   # item_key() of current video
         self.current_picture = None
+        self.played_today = {}    # item_key -> date str, prevents replaying same item
         self.running = True
         signal.signal(signal.SIGTERM, self._shutdown)
         signal.signal(signal.SIGINT,  self._shutdown)
@@ -388,13 +401,13 @@ class Streamer:
 
     def _play(self, item, video_path):
         kill_ffmpeg(self.proc)
-        picture = get_picture_overlay()
-        cmd = build_video_cmd(self.config, video_path, picture)
-        log.info(f"Playing: {item['title']}  ({video_path.name})  (slika: {picture.name if picture else 'nema'})")
+        cmd = build_video_cmd(self.config, video_path)  # slika skrivena tijekom videa
+        log.info(f"Playing: {item['title']}  ({video_path.name})")
         self.proc = start_ffmpeg(cmd)
         self.mode = "video"
         self.playing_key = item_key(item)
-        self.current_picture = picture
+        today = datetime.date.today().isoformat()
+        self.played_today[self.playing_key] = today
 
     def run(self):
         PID_FILE.write_text(str(os.getpid()))
@@ -411,22 +424,17 @@ class Streamer:
             if self.mode == "idle":
                 write_overlay_files(schedule)
 
-            # Restart stream if picture overlay changed (added, removed, or replaced)
-            picture = get_picture_overlay()
-            if picture != self.current_picture:
-                log.info(f"Promjena slike overlay-a: {self.current_picture} → {picture}")
-                if self.mode == "idle":
+            # Restart idle if picture overlay changed (only idle shows the image)
+            if self.mode == "idle":
+                picture = get_picture_overlay()
+                if picture != self.current_picture:
+                    log.info(f"Promjena slike overlay-a: {self.current_picture} → {picture}")
                     self._idle()
-                elif self.mode == "video":
-                    # Rebuild video cmd with new picture — need to know which video is playing
-                    # Re-derive video path from playing_key
-                    playing_title = self.playing_key[0] if self.playing_key else None
-                    video_path = find_video(playing_title) if playing_title else None
-                    if video_path:
-                        self._play({"title": playing_title, "time": self.playing_key[1], "date": self.playing_key[2]}, video_path)
-                    else:
-                        self._idle()
-                continue
+                    continue
+
+            # Expire played_today entries from previous days
+            today = datetime.date.today().isoformat()
+            self.played_today = {k: v for k, v in self.played_today.items() if v == today}
 
             # Handle unexpected FFmpeg exit
             if self.proc and self.proc.poll() is not None:
@@ -449,6 +457,8 @@ class Streamer:
                     key = item_key(item)
                     if self.mode == "video" and self.playing_key == key:
                         break  # already playing this
+                    if self.played_today.get(key) == today:
+                        break  # already played this item today, don't replay
                     video = find_video(item["title"])
                     if video:
                         self._play(item, video)
@@ -535,6 +545,62 @@ def cmd_remove(args):
     print(f"Uklonjeno: '{removed['title']}'")
 
 
+def cmd_image(args):
+    PICTURE_OVERLAY.mkdir(exist_ok=True)
+    images = list_overlay_images()
+
+    if not hasattr(args, "name") or args.name is None:
+        # Show current selection and available images
+        current = SELECTED_IMAGE_FILE.read_text().strip() if SELECTED_IMAGE_FILE.exists() else "nema"
+        print(f"Aktivna slika: {current}")
+        if images:
+            print("\nDostupne slike:")
+            for img in images:
+                marker = "→" if img.name == current else " "
+                print(f"  {marker} {img.name}")
+        else:
+            print("Nema slika u picture-overlay/")
+        return
+
+    name = args.name.strip()
+
+    if name == "off":
+        SELECTED_IMAGE_FILE.write_text("off")
+        print("Slika overlay-a isključena.")
+        return
+
+    # Fuzzy match against available images
+    match = None
+    for img in images:
+        if img.name == name or img.stem == name:
+            match = img
+            break
+    if not match:
+        norm_name = _norm(name)
+        for img in images:
+            if norm_name in _norm(img.stem) or _norm(img.stem) in norm_name:
+                match = img
+                break
+    if not match and images:
+        best, best_r = None, 0.0
+        for img in images:
+            r = SequenceMatcher(None, _norm(name), _norm(img.stem)).ratio()
+            if r > best_r:
+                best_r, best = r, img
+        if best_r > 0.4:
+            match = best
+
+    if not match:
+        print(f"Slika '{name}' nije pronađena u picture-overlay/")
+        if images:
+            print("Dostupne slike: " + ", ".join(i.name for i in images))
+        return
+
+    SELECTED_IMAGE_FILE.write_text(match.name)
+    print(f"Aktivna slika postavljena na: {match.name}")
+    print("Promjena će se primijeniti na defaultnom ekranu unutar 5 sekundi.")
+
+
 def cmd_status(_args):
     if not PID_FILE.exists():
         print("Streamer: zaustavljen")
@@ -565,6 +631,9 @@ def main():
     pr = sub.add_parser("remove", help="Ukloni zakazani stream prema ID-u")
     pr.add_argument("id", type=int, help="ID iz 'stream list'")
 
+    pi = sub.add_parser("image", help="Odaberi sliku overlay-a (ili 'off' za isključivanje)")
+    pi.add_argument("name", nargs="?", default=None, help="Naziv slike iz picture-overlay/ (ili 'off')")
+
     args = p.parse_args()
     dispatch = {
         "start":  cmd_start,
@@ -573,6 +642,7 @@ def main():
         "list":   cmd_list,
         "add":    cmd_add,
         "remove": cmd_remove,
+        "image":  cmd_image,
     }
     fn = dispatch.get(args.cmd)
     if fn:
