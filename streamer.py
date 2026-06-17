@@ -74,6 +74,16 @@ def save_schedule(schedule):
 def parse_time_arg(time_str):
     """Return (date_str_or_None, 'HH:MM')"""
     time_str = time_str.strip()
+
+    # "today HH:MM" → današnji datum
+    if time_str.lower().startswith("today "):
+        hm = time_str[6:].strip()
+        try:
+            datetime.datetime.strptime(hm, "%H:%M")
+            return datetime.date.today().isoformat(), hm
+        except ValueError:
+            pass
+
     for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
         try:
             dt = datetime.datetime.strptime(time_str, fmt)
@@ -85,7 +95,7 @@ def parse_time_arg(time_str):
         return None, time_str
     except ValueError:
         raise ValueError(
-            f"Neispravan format vremena: '{time_str}'. Koristi HH:MM (svaki dan) ili YYYY-MM-DD HH:MM (jednom)."
+            f"Neispravan format vremena: '{time_str}'. Koristi HH:MM (svaki dan), today HH:MM ili YYYY-MM-DD HH:MM (jednom)."
         )
 
 def item_key(item):
@@ -178,7 +188,7 @@ def write_overlay_files(schedule):
     ]
 
     def fmt(u):
-        title = u['item']['title']
+        title = u['item'].get('display_title') or u['item']['title']
         if len(title) > 40:
             title = title[:38] + ".."
         return f"{u['label']}  {title}"
@@ -514,14 +524,15 @@ def cmd_stop(_args):
 
 def cmd_add(args):
     date_str, time_str = parse_time_arg(args.time)
+    display_title = args.title if not args.title_override else args.title_override
     schedule = load_schedule()
-    entry = {"title": args.title, "time": time_str, "date": date_str}
+    entry = {"title": args.title, "display_title": display_title, "time": time_str, "date": date_str}
     schedule.append(entry)
     save_schedule(schedule)
     if date_str:
-        print(f"Dodano (jednom):    '{args.title}'  dana {date_str} u {time_str}")
+        print(f"Dodano (jednom):    '{display_title}'  dana {date_str} u {time_str}")
     else:
-        print(f"Dodano (svaki dan): '{args.title}'  svaki dan u {time_str}")
+        print(f"Dodano (svaki dan): '{display_title}'  svaki dan u {time_str}")
 
 
 def cmd_list(_args):
@@ -536,7 +547,7 @@ def cmd_list(_args):
     for i, item in enumerate(schedule):
         when = upcoming_map.get(item_key(item), item.get("date", "?"))
         repeat = "svaki dan" if not item.get("date") else "jednom"
-        title = item['title'][:40]
+        title = (item.get('display_title') or item['title'])[:40]
         print(f"  {i:>3}   {when:<18}   {repeat:<11}   {title}")
     print()
 
@@ -631,8 +642,10 @@ def main():
     sub.add_parser("list",   help="Prikaži raspored streamova")
 
     pa = sub.add_parser("add", help="Dodaj zakazani stream")
-    pa.add_argument("title", help="Naziv (uspoređuje se s datotekama u videos/)")
-    pa.add_argument("time",  help="HH:MM  ili  YYYY-MM-DD HH:MM")
+    pa.add_argument("title", help="Naziv datoteke za pretragu u videos/")
+    pa.add_argument("time",  help="HH:MM, today HH:MM ili YYYY-MM-DD HH:MM")
+    pa.add_argument("--title", dest="title_override", default=None, metavar="NASLOV",
+                    help="Custom naslov koji se prikazuje na streamu")
 
     pr = sub.add_parser("remove", help="Ukloni zakazani stream prema ID-u")
     pr.add_argument("id", type=int, help="ID iz 'stream list'")
