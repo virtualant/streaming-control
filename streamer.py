@@ -222,14 +222,27 @@ def _drawtext_file(slot, x, y, size=30, color="white@0.85"):
         f"shadowcolor=black@0.9:shadowx=2:shadowy=2"
     )
 
-def build_idle_cmd(config, picture=None):
+def get_bg_duration():
+    """Probe background.mp4 duration once so we can seek to the right loop position."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(BACKGROUND)],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    try:
+        return float(result.stdout.decode().strip())
+    except Exception:
+        return 30.0
+
+def build_idle_cmd(config, picture=None, seek=0.0):
     rtmp = f"{config['youtube_rtmp']}/{config['stream_key']}"
 
     text_filters = [_drawtext_file(0, 60, 60, size=42, color="white")]
     for i in range(1, OVERLAY_SLOTS):
         text_filters.append(_drawtext_file(i, 60, 60 + i * 58, size=30))
 
-    inputs = ["-re", "-stream_loop", "-1", "-i", str(BACKGROUND)]
+    seek_args = ["-ss", f"{seek:.2f}"] if seek > 0 else []
+    inputs = [*seek_args, "-re", "-stream_loop", "-1", "-i", str(BACKGROUND)]
 
     if picture:
         inputs += ["-i", str(picture)]
@@ -356,6 +369,8 @@ class Streamer:
         self.playing_key = None   # item_key() of current video
         self.current_picture = None
         self.played_today = {}    # item_key -> date str, prevents replaying same item
+        self.idle_started_at = 0.0
+        self.bg_duration = get_bg_duration()
         self.running = True
         signal.signal(signal.SIGTERM, self._shutdown)
         signal.signal(signal.SIGINT,  self._shutdown)
@@ -368,16 +383,25 @@ class Streamer:
         sys.exit(0)
 
     def _idle(self):
+        # Compute seek position so background.mp4 continues from where it left off
+        if self.idle_started_at > 0 and self.bg_duration > 0:
+            elapsed = time.time() - self.idle_started_at
+            seek = elapsed % self.bg_duration
+        else:
+            seek = 0.0
+
         kill_ffmpeg(self.proc)
         schedule = load_schedule()
         write_overlay_files(schedule)
         picture = get_picture_overlay()
-        cmd = build_idle_cmd(self.config, picture)
-        log.info(f"Idle stream started  (slika: {picture.name if picture else 'nema'})")
+        cmd = build_idle_cmd(self.config, picture, seek=seek)
+        log.info(f"Idle stream started  seek={seek:.1f}s  (slika: {picture.name if picture else 'nema'})")
         self.proc = start_ffmpeg(cmd)
         self.mode = "idle"
         self.playing_key = None
         self.current_picture = picture
+        if self.idle_started_at == 0.0:
+            self.idle_started_at = time.time()
 
     def _play(self, item, video_path):
         kill_ffmpeg(self.proc)
@@ -386,6 +410,7 @@ class Streamer:
         self.proc = start_ffmpeg(cmd)
         self.mode = "video"
         self.playing_key = item_key(item)
+        self.idle_started_at = 0.0  # resetiraj timer, idle će početi iznova nakon videa
         today = datetime.date.today().isoformat()
         self.played_today[self.playing_key] = today
 
