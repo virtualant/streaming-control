@@ -304,6 +304,7 @@ def build_video_cmd(config, video_path, seek=0.0):
         "-re", "-i", str(video_path),
         "-filter_complex", fc,
         "-map", "[out]", "-map", "1:a",
+        "-shortest",
         "-c:v", "libx264", "-preset", "veryfast",
         "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "9000k",
         "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "44100",
