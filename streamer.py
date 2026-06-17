@@ -194,11 +194,8 @@ def write_overlay_files(schedule):
         return f"{u['label']}  {title}"
 
     lines = [fmt(u) for u in upcoming]
-    if not lines:
-        lines = ["Nema zakazanih videa"]
-
     # Slot 0 = header, slots 1-5 = schedule lines (blank if unused)
-    slots = ["TV RASPORED"] + lines + [""] * (OVERLAY_SLOTS - 1 - len(lines))
+    slots = ["TSETSE TV"] + lines + [""] * (OVERLAY_SLOTS - 1 - len(lines))
     for i, text in enumerate(slots[:OVERLAY_SLOTS]):
         (OVERLAY_DIR / f"line{i}.txt").write_text(text)
 
