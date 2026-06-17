@@ -216,7 +216,7 @@ def build_idle_cmd(config, picture=None):
     if picture:
         inputs += ["-i", str(picture)]
         text_chain = ",".join(text_filters)
-        fc = f"[0:v]{text_chain}[txt];[txt][1:v]overlay=0:0[out]"
+        fc = f"[0:v]{text_chain}[txt];[txt][1:v]overlay=(W-w)/2:(H-h)/2[out]"
         return [
             "ffmpeg", "-hide_banner", *inputs,
             "-filter_complex", fc, "-map", "[out]", "-map", "0:a",
@@ -264,9 +264,9 @@ def build_video_cmd(config, video_path, picture=None):
 
     if picture:
         if vertical:
-            fc = f"[0:v]{WIDESCREEN_VF}[wide];[wide][1:v]overlay=0:0[out]"
+            fc = f"[0:v]{WIDESCREEN_VF}[wide];[wide][1:v]overlay=(W-w)/2:(H-h)/2[out]"
         else:
-            fc = "[0:v][1:v]overlay=0:0[out]"
+            fc = "[0:v][1:v]overlay=(W-w)/2:(H-h)/2[out]"
         return [
             "ffmpeg", "-hide_banner",
             "-re", "-i", str(video_path),
