@@ -289,7 +289,7 @@ def build_feeder_cmd(config, picture=None, seek=0.0):
 def build_pip_black_cmd():
     """Writes black frames into the PIP FIFO when no video is scheduled."""
     return [
-        "ffmpeg", "-hide_banner",
+        "ffmpeg", "-hide_banner", "-y",
         "-f", "lavfi", "-i", f"color=black:size={PIP_W}x{PIP_H}:rate=30",
         "-f", "rawvideo", "-pix_fmt", "yuv420p",
         str(FIFO_PATH),
@@ -302,7 +302,7 @@ def build_pip_video_cmd(video_path):
         f"pad={PIP_W}:{PIP_H}:(ow-iw)/2:(oh-ih)/2:black"
     )
     return [
-        "ffmpeg", "-hide_banner",
+        "ffmpeg", "-hide_banner", "-y",
         "-re", "-i", str(video_path),
         "-vf", vf,
         "-f", "rawvideo", "-pix_fmt", "yuv420p",
