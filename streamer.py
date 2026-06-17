@@ -177,7 +177,13 @@ def write_overlay_files(schedule):
         if u["dt"] <= cutoff
     ]
 
-    lines = [f"{u['label']}  —  {u['item']['title']}" for u in upcoming]
+    def fmt(u):
+        title = u['item']['title']
+        if len(title) > 40:
+            title = title[:38] + ".."
+        return f"{u['label']}  {title}"
+
+    lines = [fmt(u) for u in upcoming]
     if not lines:
         lines = ["Nema zakazanih videa"]
 
@@ -247,38 +253,17 @@ def build_idle_cmd(config, picture=None):
         "-f", "flv", rtmp,
     ]
 
-def is_vertical(video_path):
-    """Return True if the video is taller than it is wide."""
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=p=0", str(video_path),
-        ],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-    )
-    if result.returncode == 0:
-        parts = result.stdout.decode().strip().split(",")
-        if len(parts) == 2:
-            try:
-                w, h = int(parts[0]), int(parts[1])
-                return h > w
-            except ValueError:
-                pass
-    return False
-
-# Scales vertical video to fit 1080p with black pillarboxes on both sides
-WIDESCREEN_VF = "scale=-2:1080,pad=1920:1080:(ow-iw)/2:0:black"
+# Uvijek skalira video na točno 1920x1080, uz crne rubove ako treba (4:3, vertikalni, itd.)
+NORMALIZE_VF = (
+    "scale=1920:1080:force_original_aspect_ratio=decrease,"
+    "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black"
+)
 
 def build_video_cmd(config, video_path, picture=None):
     rtmp = f"{config['youtube_rtmp']}/{config['stream_key']}"
-    vertical = is_vertical(video_path)
 
     if picture:
-        if vertical:
-            fc = f"[0:v]{WIDESCREEN_VF}[wide];[wide][1:v]overlay=(W-w)/2:(H-h)/2[out]"
-        else:
-            fc = "[0:v][1:v]overlay=(W-w)/2:(H-h)/2[out]"
+        fc = f"[0:v]{NORMALIZE_VF}[scaled];[scaled][1:v]overlay=(W-w)/2:(H-h)/2[out]"
         return [
             "ffmpeg", "-hide_banner",
             "-re", "-i", str(video_path),
@@ -291,20 +276,15 @@ def build_video_cmd(config, video_path, picture=None):
             "-f", "flv", rtmp,
         ]
 
-    vf = WIDESCREEN_VF if vertical else None
-    cmd = [
+    return [
         "ffmpeg", "-hide_banner",
         "-re", "-i", str(video_path),
-    ]
-    if vf:
-        cmd += ["-vf", vf]
-    cmd += [
+        "-vf", NORMALIZE_VF,
         "-c:v", "libx264", "-preset", "veryfast",
         "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "9000k",
         "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "44100",
         "-f", "flv", rtmp,
     ]
-    return cmd
 
 def _open_log():
     return open(LOG_FILE, "a")
@@ -531,7 +511,8 @@ def cmd_list(_args):
     for i, item in enumerate(schedule):
         when = upcoming_map.get(item_key(item), item.get("date", "?"))
         repeat = "svaki dan" if not item.get("date") else "jednom"
-        print(f"  {i:>3}   {when:<18}   {repeat:<11}   {item['title']}")
+        title = item['title'][:40]
+        print(f"  {i:>3}   {when:<18}   {repeat:<11}   {title}")
     print()
 
 
