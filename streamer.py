@@ -246,8 +246,8 @@ def get_bg_duration():
     except Exception:
         return 30.0
 
-def build_feeder_cmd(config, picture=None, seek=0.0):
-    """Permanent compositor: background + PIP FIFO (+ optional picture) → nginx."""
+def build_feeder_cmd(config, seek=0.0):
+    """Permanent compositor: background + PIP FIFO + drawtext → nginx. Nikad ne restarta."""
     seek_args = ["-ss", f"{seek:.2f}"] if seek > 0 else []
 
     text_filters = [_drawtext_file(0, 60, 60, size=42, color="white")]
@@ -255,29 +255,17 @@ def build_feeder_cmd(config, picture=None, seek=0.0):
         text_filters.append(_drawtext_file(i, 60, 60 + i * 58, size=28))
     text_chain = ",".join(text_filters)
 
-    pip_input = [
+    fc = (
+        f"[0:v]{text_chain}[bg];"
+        f"[bg][1:v]overlay={PIP_X}:{PIP_Y}[out]"
+    )
+
+    return [
+        "ffmpeg", "-hide_banner",
+        *seek_args, "-re", "-stream_loop", "-1", "-i", str(BACKGROUND),
         "-f", "rawvideo", "-pix_fmt", "yuv420p",
         "-video_size", f"{PIP_W}x{PIP_H}", "-framerate", "30",
         "-i", str(FIFO_PATH),
-    ]
-
-    inputs = [*seek_args, "-re", "-stream_loop", "-1", "-i", str(BACKGROUND), *pip_input]
-
-    if picture:
-        inputs += ["-loop", "1", "-i", str(picture)]
-        fc = (
-            f"[0:v]{text_chain}[bg];"
-            f"[bg][1:v]overlay={PIP_X}:{PIP_Y}[pip];"
-            f"[pip][2:v]overlay=(W-w)/2:(H-h)/2[out]"
-        )
-    else:
-        fc = (
-            f"[0:v]{text_chain}[bg];"
-            f"[bg][1:v]overlay={PIP_X}:{PIP_Y}[out]"
-        )
-
-    return [
-        "ffmpeg", "-hide_banner", *inputs,
         "-filter_complex", fc,
         "-map", "[out]", "-map", "0:a",
         "-c:v", "libx264", "-preset", "veryfast",
@@ -286,8 +274,18 @@ def build_feeder_cmd(config, picture=None, seek=0.0):
         "-f", "flv", "rtmp://localhost/live/feed",
     ]
 
-def build_pip_black_cmd():
-    """Writes black frames into the PIP FIFO when no video is scheduled."""
+def build_pip_black_cmd(picture=None):
+    """Crni PIP frame, opcionalno s picture overlayom (za idle ekran)."""
+    if picture:
+        return [
+            "ffmpeg", "-hide_banner", "-y",
+            "-f", "lavfi", "-i", f"color=black:size={PIP_W}x{PIP_H}:rate=30",
+            "-loop", "1", "-i", str(picture),
+            "-filter_complex", "[0:v][1:v]overlay=(W-w)/2:(H-h)/2[out]",
+            "-map", "[out]",
+            "-f", "rawvideo", "-pix_fmt", "yuv420p",
+            str(FIFO_PATH),
+        ]
     return [
         "ffmpeg", "-hide_banner", "-y",
         "-f", "lavfi", "-i", f"color=black:size={PIP_W}x{PIP_H}:rate=30",
@@ -296,7 +294,7 @@ def build_pip_black_cmd():
     ]
 
 def build_pip_video_cmd(video_path):
-    """Scales video to PIP box and writes raw frames into the FIFO."""
+    """Scales video to PIP box and writes raw frames into the FIFO. Bez picture overlaya."""
     vf = (
         f"scale={PIP_W}:{PIP_H}:force_original_aspect_ratio=decrease,"
         f"pad={PIP_W}:{PIP_H}:(ow-iw)/2:(oh-ih)/2:black"
@@ -419,35 +417,37 @@ class Streamer:
         return 0.0
 
     def _start_feeder(self):
+        """Pokreće feeder. Poziva se samo pri startu i crashu — nikad pri promjeni moda."""
         seek = self._seek()
         kill_ffmpeg(self.feeder_proc)
-        picture = get_picture_overlay() if self.mode == "idle" else None
         write_overlay_files(load_schedule())
-        cmd = build_feeder_cmd(self.config, picture, seek)
-        log.info(f"Feeder pokrenut  seek={seek:.1f}s  slika={picture.name if picture else 'nema'}")
+        cmd = build_feeder_cmd(self.config, seek)
+        log.info(f"Feeder pokrenut  seek={seek:.1f}s")
         self.feeder_proc = start_ffmpeg(cmd)
         self.feeder_started_at = time.time() - seek
-        self.current_picture = picture
 
     def _start_pip_black(self):
+        """Swap pip na crni ekran s opcionalnom slikom. Feeder ostaje živ."""
         kill_ffmpeg(self.pip_proc)
-        self.pip_proc = start_ffmpeg(build_pip_black_cmd())
-        log.info("PIP: crni ekran")
+        picture = get_picture_overlay()
+        self.pip_proc = start_ffmpeg(build_pip_black_cmd(picture))
+        self.current_picture = picture
+        log.info(f"PIP: crni ekran  slika={picture.name if picture else 'nema'}")
 
     def _idle(self):
-        self._start_pip_black()
+        """Prebaci na idle — samo swapa pip_proc, feeder ostaje živ."""
         self.mode = "idle"
         self.playing_key = None
-        self._start_feeder()
+        self._start_pip_black()
 
     def _play(self, item, video_path):
-        self.mode = "video"  # postaviti prije _start_feeder da izostavi picture
+        """Prebaci na video — samo swapa pip_proc, feeder ostaje živ."""
+        kill_ffmpeg(self.pip_proc)
+        self.pip_proc = start_ffmpeg(build_pip_video_cmd(video_path))
+        self.mode = "video"
         self.playing_key = item_key(item)
         today = datetime.date.today().isoformat()
         self.played_today[self.playing_key] = today
-        self._start_feeder()   # restart bez picture overlaya
-        kill_ffmpeg(self.pip_proc)
-        self.pip_proc = start_ffmpeg(build_pip_video_cmd(video_path))
         log.info(f"PIP: video '{item['title']}' ({video_path.name})")
 
     def run(self):
@@ -483,12 +483,12 @@ class Streamer:
             # Expire played_today
             self.played_today = {k: v for k, v in self.played_today.items() if v == today}
 
-            # Promjena picture overlaya (samo u idle modu) → restart feeder
+            # Promjena picture overlaya (samo u idle modu) → swap pip_proc
             if self.mode == "idle":
                 picture = get_picture_overlay()
                 if picture != self.current_picture:
-                    log.info(f"Slika promijenjena → restart feedera")
-                    self._start_feeder()
+                    log.info(f"Slika promijenjena → swap pip")
+                    self._start_pip_black()
                     continue
 
             # Feeder health
