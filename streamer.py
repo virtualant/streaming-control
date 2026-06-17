@@ -170,23 +170,30 @@ def write_overlay_files(schedule):
     """Write per-slot text files that FFmpeg re-reads every frame via reload=1."""
     OVERLAY_DIR.mkdir(exist_ok=True)
     now = datetime.datetime.now()
-    upcoming = get_upcoming(schedule, limit=5, now=now)
+    cutoff = now + datetime.timedelta(hours=5)
+    upcoming = [
+        u for u in get_upcoming(schedule, limit=5, now=now)
+        if u["dt"] <= cutoff
+    ]
 
     lines = [f"{u['label']}  —  {u['item']['title']}" for u in upcoming]
     if not lines:
-        lines = ["Nema zakazanih streamova"]
+        lines = ["Nema zakazanih videa"]
 
     # Slot 0 = header, slots 1-5 = schedule lines (blank if unused)
-    slots = ["RASPORED"] + lines + [""] * (OVERLAY_SLOTS - 1 - len(lines))
+    slots = ["TV RASPORED"] + lines + [""] * (OVERLAY_SLOTS - 1 - len(lines))
     for i, text in enumerate(slots[:OVERLAY_SLOTS]):
         (OVERLAY_DIR / f"line{i}.txt").write_text(text)
 
 def get_picture_overlay():
-    """Return the first PNG found in picture-overlay/, or None."""
+    """Return the first image (PNG/JPG) found in picture-overlay/, or None."""
     if not PICTURE_OVERLAY.exists():
         return None
-    pngs = sorted(PICTURE_OVERLAY.glob("*.png"))
-    return pngs[0] if pngs else None
+    images = sorted([
+        p for ext in ("*.png", "*.jpg", "*.jpeg")
+        for p in PICTURE_OVERLAY.glob(ext)
+    ])
+    return images[0] if images else None
 
 def _drawtext_file(slot, x, y, size=30, color="white@0.85"):
     path = str(OVERLAY_DIR / f"line{slot}.txt").replace("\\", "/").replace(":", "\\:")
@@ -228,15 +235,43 @@ def build_idle_cmd(config, picture=None):
         "-f", "flv", rtmp,
     ]
 
+def is_vertical(video_path):
+    """Return True if the video is taller than it is wide."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0", str(video_path),
+        ],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    if result.returncode == 0:
+        parts = result.stdout.decode().strip().split(",")
+        if len(parts) == 2:
+            try:
+                w, h = int(parts[0]), int(parts[1])
+                return h > w
+            except ValueError:
+                pass
+    return False
+
+# Scales vertical video to fit 1080p with black pillarboxes on both sides
+WIDESCREEN_VF = "scale=-2:1080,pad=1920:1080:(ow-iw)/2:0:black"
+
 def build_video_cmd(config, video_path, picture=None):
     rtmp = f"{config['youtube_rtmp']}/{config['stream_key']}"
+    vertical = is_vertical(video_path)
 
     if picture:
+        if vertical:
+            fc = f"[0:v]{WIDESCREEN_VF}[wide];[wide][1:v]overlay=0:0[out]"
+        else:
+            fc = "[0:v][1:v]overlay=0:0[out]"
         return [
             "ffmpeg", "-hide_banner",
             "-re", "-i", str(video_path),
             "-i", str(picture),
-            "-filter_complex", "[0:v][1:v]overlay=0:0[out]",
+            "-filter_complex", fc,
             "-map", "[out]", "-map", "0:a",
             "-c:v", "libx264", "-preset", "veryfast",
             "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "9000k",
@@ -244,14 +279,20 @@ def build_video_cmd(config, video_path, picture=None):
             "-f", "flv", rtmp,
         ]
 
-    return [
+    vf = WIDESCREEN_VF if vertical else None
+    cmd = [
         "ffmpeg", "-hide_banner",
         "-re", "-i", str(video_path),
+    ]
+    if vf:
+        cmd += ["-vf", vf]
+    cmd += [
         "-c:v", "libx264", "-preset", "veryfast",
         "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "9000k",
         "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "44100",
         "-f", "flv", rtmp,
     ]
+    return cmd
 
 def _open_log():
     return open(LOG_FILE, "a")
@@ -362,7 +403,7 @@ class Streamer:
         self._idle()
 
         while self.running:
-            time.sleep(30)
+            time.sleep(5)
             now = datetime.datetime.now()
             schedule = load_schedule()
 
