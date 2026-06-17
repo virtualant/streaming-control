@@ -1,0 +1,6 @@
+{
+  "youtube_rtmp": "rtmp://a.rtmp.youtube.com/live2",
+  "stream_key": "YOUR_STREAM_KEY_HERE",
+  "bitrate": "4500k",
+  "audio_bitrate": "128k"
+}
