@@ -24,8 +24,6 @@ OVERLAY_DIR         = BASE_DIR / ".overlay"
 OVERLAY_SLOTS       = 6  # header + 5 schedule lines
 PICTURE_OVERLAY     = BASE_DIR / "picture-overlay"
 SELECTED_IMAGE_FILE = BASE_DIR / ".selected_image"
-FIFO_PATH           = BASE_DIR / ".pip.fifo"
-
 # PIP box: desna strana ekrana, ne prekriva overlay tekst lijevo
 PIP_W, PIP_H = 1240, 698   # 16:9
 PIP_X, PIP_Y = 640,  191   # x=640 ostavlja 580px za overlay, y centriran
@@ -246,9 +244,48 @@ def get_bg_duration():
     except Exception:
         return 30.0
 
-def build_feeder_cmd(config, seek=0.0):
-    """Permanent compositor: background + PIP FIFO + drawtext → nginx. Nikad ne restarta."""
+def build_idle_cmd(config, picture=None, seek=0.0):
+    """Idle ekran: background loop + drawtext overlay + opcionalna slika → YouTube."""
+    rtmp = f"{config['youtube_rtmp']}/{config['stream_key']}"
     seek_args = ["-ss", f"{seek:.2f}"] if seek > 0 else []
+
+    text_filters = [_drawtext_file(0, 60, 60, size=42, color="white")]
+    for i in range(1, OVERLAY_SLOTS):
+        text_filters.append(_drawtext_file(i, 60, 60 + i * 58, size=28))
+    text_chain = ",".join(text_filters)
+
+    inputs = [*seek_args, "-re", "-stream_loop", "-1", "-i", str(BACKGROUND)]
+
+    if picture:
+        inputs += ["-loop", "1", "-i", str(picture)]
+        fc = f"[0:v]{text_chain}[txt];[txt][1:v]overlay=(W-w)/2:(H-h)/2[out]"
+        return [
+            "ffmpeg", "-hide_banner", *inputs,
+            "-filter_complex", fc, "-map", "[out]", "-map", "0:a",
+            "-c:v", "libx264", "-preset", "veryfast",
+            "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "9000k",
+            "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "44100",
+            "-f", "flv", rtmp,
+        ]
+
+    return [
+        "ffmpeg", "-hide_banner", *inputs,
+        "-vf", text_chain,
+        "-c:v", "libx264", "-preset", "veryfast",
+        "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "9000k",
+        "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "44100",
+        "-f", "flv", rtmp,
+    ]
+
+def build_video_cmd(config, video_path, seek=0.0):
+    """Video u PIP boxu na background-u, s drawtext overlayom → YouTube."""
+    rtmp = f"{config['youtube_rtmp']}/{config['stream_key']}"
+    seek_args = ["-ss", f"{seek:.2f}"] if seek > 0 else []
+
+    pip_vf = (
+        f"scale={PIP_W}:{PIP_H}:force_original_aspect_ratio=decrease,"
+        f"pad={PIP_W}:{PIP_H}:(ow-iw)/2:(oh-ih)/2:black"
+    )
 
     text_filters = [_drawtext_file(0, 60, 60, size=42, color="white")]
     for i in range(1, OVERLAY_SLOTS):
@@ -257,63 +294,19 @@ def build_feeder_cmd(config, seek=0.0):
 
     fc = (
         f"[0:v]{text_chain}[bg];"
-        f"[bg][1:v]overlay={PIP_X}:{PIP_Y}[out]"
+        f"[1:v]{pip_vf}[pip];"
+        f"[bg][pip]overlay={PIP_X}:{PIP_Y}[out]"
     )
 
     return [
         "ffmpeg", "-hide_banner",
         *seek_args, "-re", "-stream_loop", "-1", "-i", str(BACKGROUND),
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
-        "-video_size", f"{PIP_W}x{PIP_H}", "-framerate", "30",
-        "-i", str(FIFO_PATH),
+        "-re", "-i", str(video_path),
         "-filter_complex", fc,
-        "-map", "[out]", "-map", "0:a",
+        "-map", "[out]", "-map", "1:a",
         "-c:v", "libx264", "-preset", "veryfast",
         "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "9000k",
         "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "44100",
-        "-f", "flv", "rtmp://localhost/live/feed",
-    ]
-
-def build_pip_black_cmd(picture=None):
-    """Crni PIP frame, opcionalno s picture overlayom (za idle ekran)."""
-    if picture:
-        return [
-            "ffmpeg", "-hide_banner", "-y",
-            "-f", "lavfi", "-i", f"color=black:size={PIP_W}x{PIP_H}:rate=30",
-            "-loop", "1", "-i", str(picture),
-            "-filter_complex", "[0:v][1:v]overlay=(W-w)/2:(H-h)/2[out]",
-            "-map", "[out]",
-            "-f", "rawvideo", "-pix_fmt", "yuv420p",
-            str(FIFO_PATH),
-        ]
-    return [
-        "ffmpeg", "-hide_banner", "-y",
-        "-f", "lavfi", "-i", f"color=black:size={PIP_W}x{PIP_H}:rate=30",
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
-        str(FIFO_PATH),
-    ]
-
-def build_pip_video_cmd(video_path):
-    """Scales video to PIP box and writes raw frames into the FIFO. Bez picture overlaya."""
-    vf = (
-        f"scale={PIP_W}:{PIP_H}:force_original_aspect_ratio=decrease,"
-        f"pad={PIP_W}:{PIP_H}:(ow-iw)/2:(oh-ih)/2:black"
-    )
-    return [
-        "ffmpeg", "-hide_banner", "-y",
-        "-re", "-i", str(video_path),
-        "-vf", vf,
-        "-f", "rawvideo", "-pix_fmt", "yuv420p",
-        str(FIFO_PATH),
-    ]
-
-def build_main_cmd(config):
-    """Pulls composed stream from nginx and copies to YouTube — zero re-encode."""
-    rtmp = f"{config['youtube_rtmp']}/{config['stream_key']}"
-    return [
-        "ffmpeg", "-hide_banner",
-        "-i", "rtmp://localhost/live/feed",
-        "-c", "copy",
         "-f", "flv", rtmp,
     ]
 
@@ -381,96 +374,64 @@ def generate_background():
 
 class Streamer:
     def __init__(self, config):
-        self.config      = config
-        self.main_proc   = None   # nginx → YouTube (-c copy, nikad ne staje)
-        self.feeder_proc = None   # background + PIP FIFO → nginx (rijetko staje)
-        self.pip_proc    = None   # crno ili video → FIFO (swapa se)
-        self.fifo_fd     = None   # drži write-end FIFO otvorenim (sprječava EOF)
-        self.mode        = None   # "idle" | "video"
-        self.playing_key = None
+        self.config          = config
+        self.proc            = None
+        self.mode            = None   # "idle" | "video"
+        self.playing_key     = None
         self.current_picture = None
         self.played_today    = {}
-        self.feeder_started_at = 0.0
-        self.bg_duration = 30.0
-        self.running = True
+        self.idle_started_at = 0.0
+        self.bg_duration     = 30.0
+        self.running         = True
         signal.signal(signal.SIGTERM, self._shutdown)
         signal.signal(signal.SIGINT,  self._shutdown)
 
     def _shutdown(self, *_):
         log.info("Shutting down")
         self.running = False
-        for p in (self.pip_proc, self.feeder_proc, self.main_proc):
-            kill_ffmpeg(p)
-        if self.fifo_fd is not None:
-            try:
-                os.close(self.fifo_fd)
-            except OSError:
-                pass
-        FIFO_PATH.unlink(missing_ok=True)
+        kill_ffmpeg(self.proc)
         PID_FILE.unlink(missing_ok=True)
         sys.exit(0)
 
-    def _seek(self):
-        """Pozicija u background loopu da se nastavi od iste točke."""
-        if self.feeder_started_at > 0 and self.bg_duration > 0:
-            return (time.time() - self.feeder_started_at) % self.bg_duration
+    def _bg_seek(self):
+        if self.idle_started_at > 0 and self.bg_duration > 0:
+            return (time.time() - self.idle_started_at) % self.bg_duration
         return 0.0
 
-    def _start_feeder(self):
-        """Pokreće feeder. Poziva se samo pri startu i crashu — nikad pri promjeni moda."""
-        seek = self._seek()
-        kill_ffmpeg(self.feeder_proc)
-        write_overlay_files(load_schedule())
-        cmd = build_feeder_cmd(self.config, seek)
-        log.info(f"Feeder pokrenut  seek={seek:.1f}s")
-        self.feeder_proc = start_ffmpeg(cmd)
-        self.feeder_started_at = time.time() - seek
-
-    def _start_pip_black(self):
-        """Swap pip na crni ekran s opcionalnom slikom. Feeder ostaje živ."""
-        kill_ffmpeg(self.pip_proc)
-        picture = get_picture_overlay()
-        self.pip_proc = start_ffmpeg(build_pip_black_cmd(picture))
-        self.current_picture = picture
-        log.info(f"PIP: crni ekran  slika={picture.name if picture else 'nema'}")
-
     def _idle(self):
-        """Prebaci na idle — samo swapa pip_proc, feeder ostaje živ."""
+        seek = self._bg_seek()
+        kill_ffmpeg(self.proc)
+        schedule = load_schedule()
+        write_overlay_files(schedule)
+        picture = get_picture_overlay()
+        cmd = build_idle_cmd(self.config, picture, seek)
+        log.info(f"Idle stream  seek={seek:.1f}s  slika={picture.name if picture else 'nema'}")
+        self.proc = start_ffmpeg(cmd)
         self.mode = "idle"
         self.playing_key = None
-        self._start_pip_black()
+        self.current_picture = picture
+        # Postavi idle_started_at tako da seek koji smo dali odgovara sadašnjem trenutku
+        self.idle_started_at = time.time() - seek
 
     def _play(self, item, video_path):
-        """Prebaci na video — samo swapa pip_proc, feeder ostaje živ."""
-        kill_ffmpeg(self.pip_proc)
-        self.pip_proc = start_ffmpeg(build_pip_video_cmd(video_path))
+        seek = self._bg_seek()
+        kill_ffmpeg(self.proc)
+        cmd = build_video_cmd(self.config, video_path, seek)
+        log.info(f"Video '{item['title']}' ({video_path.name})  bg_seek={seek:.1f}s")
+        self.proc = start_ffmpeg(cmd)
         self.mode = "video"
         self.playing_key = item_key(item)
+        self.idle_started_at = 0.0
         today = datetime.date.today().isoformat()
         self.played_today[self.playing_key] = today
-        log.info(f"PIP: video '{item['title']}' ({video_path.name})")
 
     def run(self):
         PID_FILE.write_text(str(os.getpid()))
         log.info(f"Streamer daemon pokrenut  PID={os.getpid()}")
         PICTURE_OVERLAY.mkdir(exist_ok=True)
         VIDEOS_DIR.mkdir(exist_ok=True)
-
-        # Stvori FIFO i drži write-end otvorenim da feeder nikad ne dobije EOF
-        FIFO_PATH.unlink(missing_ok=True)
-        os.mkfifo(str(FIFO_PATH))
-        self.fifo_fd = os.open(str(FIFO_PATH), os.O_RDWR | os.O_NONBLOCK)
-
         self.bg_duration = get_bg_duration()
-
-        # Redoslijed pokretanja: pip → feeder → (pauza) → main
-        self.mode = "idle"
-        self._start_pip_black()
-        time.sleep(0.5)
-        self._start_feeder()
-        time.sleep(3)   # daj feederu vremena da počne pushati u nginx
-        self.main_proc = start_ffmpeg(build_main_cmd(self.config))
-        log.info("Main proc pokrenut (YouTube pusher)")
+        self._idle()
 
         while self.running:
             time.sleep(5)
@@ -479,32 +440,18 @@ class Streamer:
             today    = datetime.date.today().isoformat()
 
             write_overlay_files(schedule)
-
-            # Expire played_today
             self.played_today = {k: v for k, v in self.played_today.items() if v == today}
 
-            # Promjena picture overlaya (samo u idle modu) → swap pip_proc
+            # Promjena slike u idle modu
             if self.mode == "idle":
                 picture = get_picture_overlay()
                 if picture != self.current_picture:
-                    log.info(f"Slika promijenjena → swap pip")
-                    self._start_pip_black()
+                    log.info("Slika promijenjena, restart idle")
+                    self._idle()
                     continue
 
-            # Feeder health
-            if self.feeder_proc and self.feeder_proc.poll() is not None:
-                log.warning("Feeder pao, restartanje")
-                self._start_feeder()
-                continue
-
-            # Main health
-            if self.main_proc and self.main_proc.poll() is not None:
-                log.warning("Main proc pao, restartanje")
-                self.main_proc = start_ffmpeg(build_main_cmd(self.config))
-                continue
-
-            # PIP health
-            if self.pip_proc and self.pip_proc.poll() is not None:
+            # FFmpeg pao neočekivano
+            if self.proc and self.proc.poll() is not None:
                 if self.mode == "video":
                     log.info(f"Video završio: {self.playing_key}")
                     schedule = [
@@ -512,10 +459,9 @@ class Streamer:
                         if not (item_key(s) == self.playing_key and s.get("date"))
                     ]
                     save_schedule(schedule)
-                    self._idle()
                 else:
-                    log.warning("PIP black pao, restartanje")
-                    self._start_pip_black()
+                    log.warning("Idle stream pao, restartanje")
+                self._idle()
                 continue
 
             # Provjera rasporeda
