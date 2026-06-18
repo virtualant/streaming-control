@@ -19,6 +19,10 @@ SCHEDULE_FILE = BASE_DIR / "schedule.json"
 VIDEOS_DIR    = BASE_DIR / "videos"
 BACKGROUND    = BASE_DIR / "background.mp4"
 BACKGROUND_STILL = BASE_DIR / ".background_still.jpg"
+LOGO_FILE        = BASE_DIR / "muha-mini.png"
+LOGO_H           = 70    # visina loga u px
+LOGO_X           = 310   # desno od "TSETSE TV" teksta
+LOGO_Y           = 40    # vertikalno centriran s tekstom
 PID_FILE      = BASE_DIR / ".streamer.pid"
 LOG_FILE      = BASE_DIR / "streamer.log"
 OVERLAY_DIR         = BASE_DIR / ".overlay"
@@ -314,7 +318,7 @@ def compute_pip_box(video_path):
     return pip_w, pip_h, pip_x, pip_y
 
 def build_idle_cmd(config, picture=None, seek=0.0):
-    """Idle ekran: background loop + drawtext overlay + opcionalna slika → YouTube."""
+    """Idle ekran: background loop + drawtext + logo + opcionalna slika → YouTube."""
     rtmp = f"{config['youtube_rtmp']}/{config['stream_key']}"
     seek_args = ["-ss", f"{seek:.2f}"] if seek > 0 else []
 
@@ -324,22 +328,27 @@ def build_idle_cmd(config, picture=None, seek=0.0):
     text_chain = ",".join(text_filters)
 
     inputs = [*seek_args, "-re", "-stream_loop", "-1", "-i", str(BACKGROUND)]
-
+    has_logo = LOGO_FILE.exists()
+    if has_logo:
+        inputs += ["-loop", "1", "-i", str(LOGO_FILE)]
     if picture:
         inputs += ["-loop", "1", "-i", str(picture)]
-        fc = f"[0:v]{text_chain}[txt];[txt][1:v]overlay=(W-w)/2:(H-h)/2[out]"
-        return [
-            "ffmpeg", "-hide_banner", *inputs,
-            "-filter_complex", fc, "-map", "[out]", "-map", "0:a",
-            "-c:v", "libx264", "-preset", "veryfast", "-g", "60",
-            "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "9000k",
-            "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "44100",
-            "-f", "flv", "-rtmp_live", "live", rtmp,
-        ]
+
+    # Sastavi filter_complex prema prisutnosti loga i slike
+    chain = f"[0:v]{text_chain}[v0]"
+    last = "[v0]"
+    idx = 1
+    if has_logo:
+        chain += f";[{idx}:v]scale=-1:{LOGO_H}[logo];{last}[logo]overlay={LOGO_X}:{LOGO_Y}[v{idx}]"
+        last = f"[v{idx}]"
+        idx += 1
+    if picture:
+        chain += f";{last}[{idx}:v]overlay=(W-w)/2:(H-h)/2[v{idx}]"
+        last = f"[v{idx}]"
 
     return [
         "ffmpeg", "-hide_banner", *inputs,
-        "-vf", text_chain,
+        "-filter_complex", chain, "-map", last, "-map", "0:a",
         "-c:v", "libx264", "-preset", "veryfast", "-g", "60",
         "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "9000k",
         "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "44100",
@@ -358,12 +367,6 @@ def build_video_cmd(config, video_path, seek=0.0):
         text_filters.append(_drawtext_file(i, 60, 60 + i * 58, size=28))
     text_chain = ",".join(text_filters)
 
-    fc = (
-        f"[0:v]{text_chain}[bg];"
-        f"[1:v]{pip_vf}[pip];"
-        f"[bg][pip]overlay={pip_x}:{pip_y}[out]"
-    )
-
     # Statična slika kao pozadina umjesto background.mp4 — nema dekodiranja u realtime
     bg_input = str(BACKGROUND_STILL) if BACKGROUND_STILL.exists() else str(BACKGROUND)
     if BACKGROUND_STILL.exists():
@@ -371,12 +374,27 @@ def build_video_cmd(config, video_path, seek=0.0):
     else:
         bg_args = ["-re", "-stream_loop", "-1", "-i", bg_input]
 
+    # Inputs: [0]=bg, [1]=video, [2]=logo (ako postoji)
+    has_logo = LOGO_FILE.exists()
+    chain = (
+        f"[0:v]{text_chain}[bg];"
+        f"[1:v]{pip_vf}[pip];"
+        f"[bg][pip]overlay={pip_x}:{pip_y}[v0]"
+    )
+    last = "[v0]"
+    extra_inputs = []
+    if has_logo:
+        extra_inputs += ["-loop", "1", "-i", str(LOGO_FILE)]
+        chain += f";[2:v]scale=-1:{LOGO_H}[logo];{last}[logo]overlay={LOGO_X}:{LOGO_Y}[v1]"
+        last = "[v1]"
+
     return [
         "ffmpeg", "-hide_banner",
         *bg_args,
         "-re", "-i", str(video_path),
-        "-filter_complex", fc,
-        "-map", "[out]", "-map", "1:a",
+        *extra_inputs,
+        "-filter_complex", chain,
+        "-map", last, "-map", "1:a",
         "-shortest",
         "-c:v", "libx264", "-preset", "veryfast", "-g", "60",
         "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "9000k",
