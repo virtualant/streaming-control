@@ -262,6 +262,18 @@ def get_bg_duration():
     except Exception:
         return 30.0
 
+def get_video_duration(video_path):
+    """Vrati trajanje videa u sekundama, ili None."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    try:
+        return float(result.stdout.decode().strip())
+    except Exception:
+        return None
+
 def get_video_dimensions(video_path):
     """Vrati (width, height) videa preko ffprobea. Fallback na 16:9."""
     result = subprocess.run(
@@ -660,14 +672,36 @@ def cmd_list(_args):
         print("Raspored je prazan.")
         return
     now = datetime.datetime.now()
-    upcoming_map = {item_key(u["item"]): u["label"] for u in get_upcoming(schedule, limit=100, now=now)}
-    print(f"\n {'ID':>3}   {'Sljedeće':^18}   {'Ponavljanje':^11}   Naziv")
-    print("  " + "─" * 60)
+    upcoming = get_upcoming(schedule, limit=100, now=now)
+    upcoming_map = {item_key(u["item"]): u for u in upcoming}
+    print(f"\n {'ID':>3}   {'Sljedeće':^18}   {'Trajanje':^9}   {'Kraj':^11}   {'Ponavljanje':^11}   Naziv")
+    print("  " + "─" * 90)
     for i, item in enumerate(schedule):
-        when = upcoming_map.get(item_key(item), item.get("date", "?"))
+        u = upcoming_map.get(item_key(item))
+        when = u["label"] if u else item.get("date", "?")
         repeat = "svaki dan" if not item.get("date") else "jednom"
         title = (item.get('display_title') or item['title'])[:40]
-        print(f"  {i:>3}   {when:<18}   {repeat:<11}   {title}")
+        video = find_video(item["title"])
+        duration_str = "?"
+        end_str = "?"
+        if video:
+            dur = get_video_duration(video)
+            if dur:
+                mins = int(dur // 60)
+                secs = int(dur % 60)
+                duration_str = f"{mins}m {secs:02d}s"
+                if u:
+                    end_dt = u["dt"] + datetime.timedelta(seconds=dur)
+                    days = (end_dt.date() - now.date()).days
+                    if days == 0:
+                        end_str = end_dt.strftime("%H:%M")
+                    elif days == 1:
+                        end_str = f"Sutra {end_dt.strftime('%H:%M')}"
+                    else:
+                        end_str = end_dt.strftime("%a %H:%M")
+        else:
+            duration_str = "nema"
+        print(f"  {i:>3}   {when:<18}   {duration_str:<9}   {end_str:<11}   {repeat:<11}   {title}")
     print()
 
 
