@@ -200,8 +200,8 @@ def write_overlay_files(schedule):
 
     def fmt(u):
         title = u['item'].get('display_title') or u['item']['title']
-        if len(title) > 40:
-            title = title[:38] + ".."
+        if len(title) > 90:
+            title = title[:88] + ".."
         return f"{u['label']}  {title}"
 
     lines = [fmt(u) for u in upcoming]
