@@ -18,6 +18,7 @@ CONFIG_FILE   = BASE_DIR / "config.json"
 SCHEDULE_FILE = BASE_DIR / "schedule.json"
 VIDEOS_DIR    = BASE_DIR / "videos"
 BACKGROUND    = BASE_DIR / "background.mp4"
+BACKGROUND_STILL = BASE_DIR / ".background_still.jpg"
 PID_FILE      = BASE_DIR / ".streamer.pid"
 LOG_FILE      = BASE_DIR / "streamer.log"
 OVERLAY_DIR         = BASE_DIR / ".overlay"
@@ -233,6 +234,18 @@ def _drawtext_file(slot, x, y, size=30, color="white@0.85"):
         f"shadowcolor=black@0.9:shadowx=2:shadowy=2"
     )
 
+def ensure_background_still():
+    """Izvuci statični frame iz background.mp4 jednom (za video mod, da nema dekodiranja)."""
+    if BACKGROUND_STILL.exists():
+        return
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner",
+        "-ss", "2", "-i", str(BACKGROUND),
+        "-vframes", "1", "-q:v", "3",
+        str(BACKGROUND_STILL),
+    ]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 def get_bg_duration():
     """Probe background.mp4 duration once so we can seek to the right loop position."""
     result = subprocess.run(
@@ -334,9 +347,8 @@ def build_idle_cmd(config, picture=None, seek=0.0):
     ]
 
 def build_video_cmd(config, video_path, seek=0.0):
-    """Video u PIP boxu na background-u, s drawtext overlayom → YouTube."""
+    """Video u PIP boxu na statičnoj pozadini + drawtext overlay → YouTube."""
     rtmp = f"{config['youtube_rtmp']}/{config['stream_key']}"
-    seek_args = ["-ss", f"{seek:.2f}"] if seek > 0 else []
 
     pip_w, pip_h, pip_x, pip_y = compute_pip_box(video_path)
     pip_vf = f"scale={pip_w}:{pip_h}:force_original_aspect_ratio=decrease,pad={pip_w}:{pip_h}:(ow-iw)/2:(oh-ih)/2:black"
@@ -352,9 +364,16 @@ def build_video_cmd(config, video_path, seek=0.0):
         f"[bg][pip]overlay={pip_x}:{pip_y}[out]"
     )
 
+    # Statična slika kao pozadina umjesto background.mp4 — nema dekodiranja u realtime
+    bg_input = str(BACKGROUND_STILL) if BACKGROUND_STILL.exists() else str(BACKGROUND)
+    if BACKGROUND_STILL.exists():
+        bg_args = ["-loop", "1", "-framerate", "30", "-i", bg_input]
+    else:
+        bg_args = ["-re", "-stream_loop", "-1", "-i", bg_input]
+
     return [
         "ffmpeg", "-hide_banner",
-        *seek_args, "-re", "-stream_loop", "-1", "-i", str(BACKGROUND),
+        *bg_args,
         "-re", "-i", str(video_path),
         "-filter_complex", fc,
         "-map", "[out]", "-map", "1:a",
@@ -486,6 +505,7 @@ class Streamer:
         PICTURE_OVERLAY.mkdir(exist_ok=True)
         VIDEOS_DIR.mkdir(exist_ok=True)
         self.bg_duration = get_bg_duration()
+        ensure_background_still()
         self._idle()
 
         while self.running:
