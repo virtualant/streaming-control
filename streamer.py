@@ -26,7 +26,7 @@ LOGO_Y           = 40    # vertikalno centriran s tekstom
 PID_FILE      = BASE_DIR / ".streamer.pid"
 LOG_FILE      = BASE_DIR / "streamer.log"
 OVERLAY_DIR         = BASE_DIR / ".overlay"
-OVERLAY_SLOTS       = 6  # header + 5 schedule lines
+OVERLAY_SLOTS       = 7  # header + 6 schedule lines
 PICTURE_OVERLAY     = BASE_DIR / "picture-overlay"
 SELECTED_IMAGE_FILE = BASE_DIR / ".selected_image"
 CONTROL_FILE        = BASE_DIR / ".control"
@@ -194,7 +194,7 @@ def write_overlay_files(schedule):
     now = datetime.datetime.now()
     cutoff = now + datetime.timedelta(hours=5)
     upcoming = [
-        u for u in get_upcoming(schedule, limit=5, now=now)
+        u for u in get_upcoming(schedule, limit=6, now=now)
         if u["dt"] <= cutoff
     ]
 
@@ -338,7 +338,7 @@ def build_idle_cmd(config, picture=None, seek=0.0):
 
     text_filters = [_drawtext_file(0, 60, 60, size=42, color="white")]
     for i in range(1, OVERLAY_SLOTS):
-        text_filters.append(_drawtext_file(i, 60, 60 + i * 58, size=28))
+        text_filters.append(_drawtext_file(i, 60, 60 + i * 58, size=38))
     text_chain = ",".join(text_filters)
 
     inputs = [*seek_args, "-re", "-stream_loop", "-1", "-i", str(BACKGROUND)]
@@ -382,7 +382,7 @@ def build_video_cmd(config, video_path, seek=0.0):
 
     text_filters = [_drawtext_file(0, 60, 60, size=42, color="white")]
     for i in range(1, OVERLAY_SLOTS):
-        text_filters.append(_drawtext_file(i, 60, 60 + i * 58, size=28))
+        text_filters.append(_drawtext_file(i, 60, 60 + i * 58, size=38))
     text_chain = ",".join(text_filters)
 
     # Statična slika kao pozadina umjesto background.mp4 — nema dekodiranja u realtime
