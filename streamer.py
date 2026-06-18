@@ -367,7 +367,7 @@ def build_idle_cmd(config, picture=None, seek=0.0):
     return [
         "ffmpeg", "-hide_banner", *inputs,
         "-filter_complex", chain, "-map", last, "-map", "0:a",
-        "-c:v", "libx264", "-preset", "veryfast", "-g", "60",
+        "-c:v", "libx264", "-preset", "ultrafast", "-g", "60",
         "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "2400k",
         "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "44100",
         "-f", "flv", "-rtmp_live", "live", rtmp,
@@ -423,7 +423,7 @@ def build_video_cmd(config, video_path, seek=0.0):
         "-filter_complex", chain,
         "-map", last, *audio_args,
         "-shortest",
-        "-c:v", "libx264", "-preset", "veryfast", "-g", "60",
+        "-c:v", "libx264", "-preset", "ultrafast", "-g", "60",
         "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "2400k",
         "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "44100",
         "-f", "flv", "-rtmp_live", "live", rtmp,
