@@ -24,6 +24,7 @@ OVERLAY_DIR         = BASE_DIR / ".overlay"
 OVERLAY_SLOTS       = 6  # header + 5 schedule lines
 PICTURE_OVERLAY     = BASE_DIR / "picture-overlay"
 SELECTED_IMAGE_FILE = BASE_DIR / ".selected_image"
+CONTROL_FILE        = BASE_DIR / ".control"
 # PIP box: desna strana ekrana, ne prekriva overlay tekst lijevo
 PIP_W, PIP_H = 1240, 698   # 16:9
 PIP_X, PIP_Y = 640,  191   # x=640 ostavlja 580px za overlay, y centriran
@@ -518,6 +519,34 @@ class Streamer:
                 self._idle()
                 continue
 
+            # Provjera CLI kontrola (skip / next)
+            if CONTROL_FILE.exists():
+                cmd = CONTROL_FILE.read_text().strip()
+                CONTROL_FILE.unlink(missing_ok=True)
+                if cmd == "skip" and self.mode == "video":
+                    log.info(f"CLI skip: prekidam video {self.playing_key}")
+                    # Ukloni samo ako je jednokratan
+                    if self.playing_key:
+                        schedule = [
+                            s for s in schedule
+                            if not (item_key(s) == self.playing_key and s.get("date"))
+                        ]
+                        save_schedule(schedule)
+                    self._idle()
+                    continue
+                if cmd == "next":
+                    upcoming = get_upcoming(schedule, limit=1, now=now)
+                    if upcoming:
+                        nxt = upcoming[0]["item"]
+                        video = find_video(nxt["title"])
+                        if video:
+                            log.info(f"CLI next: pokrećem '{nxt['title']}'")
+                            self._play(nxt, video)
+                            continue
+                        log.warning(f"CLI next: video nije pronađen za '{nxt['title']}'")
+                    else:
+                        log.info("CLI next: nema sljedećih u rasporedu")
+
             # Provjera rasporeda
             for item in schedule:
                 if should_play_now(item, now):
@@ -670,6 +699,29 @@ def cmd_image(args):
     print("Promjena će se primijeniti na defaultnom ekranu unutar 5 sekundi.")
 
 
+def cmd_skip(_args):
+    if not PID_FILE.exists():
+        print("Streamer nije pokrenut.")
+        return
+    CONTROL_FILE.write_text("skip")
+    print("Prekid trenutnog videa zatražen (u sljedećih 5s).")
+
+
+def cmd_next(_args):
+    if not PID_FILE.exists():
+        print("Streamer nije pokrenut.")
+        return
+    schedule = load_schedule()
+    upcoming = get_upcoming(schedule, limit=1)
+    if not upcoming:
+        print("Nema sljedećih videa u rasporedu.")
+        return
+    CONTROL_FILE.write_text("next")
+    nxt = upcoming[0]["item"]
+    title = nxt.get("display_title") or nxt["title"]
+    print(f"Pokrećem '{title}' (u sljedećih 5s).")
+
+
 def cmd_status(_args):
     if not PID_FILE.exists():
         print("Streamer: zaustavljen")
@@ -692,6 +744,8 @@ def main():
     sub.add_parser("stop",   help="Zaustavi streaming daemon")
     sub.add_parser("status", help="Prikaži status daemona")
     sub.add_parser("list",   help="Prikaži raspored streamova")
+    sub.add_parser("skip",   help="Prekini trenutni video, vrati na idle")
+    sub.add_parser("next",   help="Odmah pokreni sljedeći video iz rasporeda")
 
     pa = sub.add_parser("add", help="Dodaj zakazani stream")
     pa.add_argument("title", help="Naziv datoteke za pretragu u videos/")
@@ -714,6 +768,8 @@ def main():
         "add":    cmd_add,
         "remove": cmd_remove,
         "image":  cmd_image,
+        "skip":   cmd_skip,
+        "next":   cmd_next,
     }
     fn = dispatch.get(args.cmd)
     if fn:
