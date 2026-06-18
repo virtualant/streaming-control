@@ -244,6 +244,61 @@ def get_bg_duration():
     except Exception:
         return 30.0
 
+def get_video_dimensions(video_path):
+    """Vrati (width, height) videa preko ffprobea. Fallback na 16:9."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height",
+         "-of", "csv=p=0:s=x", str(video_path)],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    try:
+        w, h = result.stdout.decode().strip().split("x")
+        return int(w), int(h)
+    except Exception:
+        return 1920, 1080
+
+def compute_pip_box(video_path):
+    """
+    Vrati (pip_w, pip_h, pip_x, pip_y) na 1920x1080 platnu.
+    - Vertikalni video: visina 1080, širina ovisi o aspektu
+    - Horizontalni: širina do 1240 (current), visina ovisi o aspektu
+    - Max širina ograničena tako da ostane ≥300px lijevo za schedule overlay
+    - Pozicioniran desno (pip_x = 1920 - pip_w), vertikalno centriran
+    """
+    CANVAS_W, CANVAS_H = 1920, 1080
+    MIN_LEFT_PAD = 300  # prostor za schedule overlay
+    MAX_PIP_W = CANVAS_W - MIN_LEFT_PAD  # 1620
+
+    vw, vh = get_video_dimensions(video_path)
+    aspect = vw / vh if vh > 0 else 16/9
+
+    if aspect < 1.0:
+        # Vertikalni: visina puna, širina iz aspekta
+        pip_h = CANVAS_H
+        pip_w = round(pip_h * aspect)
+    else:
+        # Horizontalni: zadana širina 1240, visina iz aspekta
+        pip_w = 1240
+        pip_h = round(pip_w / aspect)
+        if pip_h > CANVAS_H:
+            pip_h = CANVAS_H
+            pip_w = round(pip_h * aspect)
+
+    # Clamp širine da ostane min padding lijevo
+    if pip_w > MAX_PIP_W:
+        pip_w = MAX_PIP_W
+        pip_h = min(CANVAS_H, round(pip_w / aspect))
+
+    # Parni brojevi (yuv420p zahtijeva)
+    pip_w -= pip_w % 2
+    pip_h -= pip_h % 2
+
+    pip_x = CANVAS_W - pip_w
+    pip_y = (CANVAS_H - pip_h) // 2
+    pip_y -= pip_y % 2
+    return pip_w, pip_h, pip_x, pip_y
+
 def build_idle_cmd(config, picture=None, seek=0.0):
     """Idle ekran: background loop + drawtext overlay + opcionalna slika → YouTube."""
     rtmp = f"{config['youtube_rtmp']}/{config['stream_key']}"
@@ -282,10 +337,8 @@ def build_video_cmd(config, video_path, seek=0.0):
     rtmp = f"{config['youtube_rtmp']}/{config['stream_key']}"
     seek_args = ["-ss", f"{seek:.2f}"] if seek > 0 else []
 
-    pip_vf = (
-        f"scale={PIP_W}:{PIP_H}:force_original_aspect_ratio=decrease,"
-        f"pad={PIP_W}:{PIP_H}:(ow-iw)/2:(oh-ih)/2:black"
-    )
+    pip_w, pip_h, pip_x, pip_y = compute_pip_box(video_path)
+    pip_vf = f"scale={pip_w}:{pip_h}:force_original_aspect_ratio=decrease,pad={pip_w}:{pip_h}:(ow-iw)/2:(oh-ih)/2:black"
 
     text_filters = [_drawtext_file(0, 60, 60, size=42, color="white")]
     for i in range(1, OVERLAY_SLOTS):
@@ -295,7 +348,7 @@ def build_video_cmd(config, video_path, seek=0.0):
     fc = (
         f"[0:v]{text_chain}[bg];"
         f"[1:v]{pip_vf}[pip];"
-        f"[bg][pip]overlay={PIP_X}:{PIP_Y}[out]"
+        f"[bg][pip]overlay={pip_x}:{pip_y}[out]"
     )
 
     return [
