@@ -37,9 +37,11 @@ PIP_X, PIP_Y = 640,  191   # x=640 ostavlja 580px za overlay, y centriran
 DEFAULT_CONFIG = {
     "youtube_rtmp": "rtmp://a.rtmp.youtube.com/live2",
     "stream_key": "YOUR_STREAM_KEY_HERE",
-    "bitrate": "4500k",
+    "bitrate": "1200k",
     "audio_bitrate": "128k",
 }
+
+OUTPUT_W, OUTPUT_H = 1280, 720
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -358,11 +360,15 @@ def build_idle_cmd(config, picture=None, seek=0.0):
         chain += f";{last}[{idx}:v]overlay=(W-w)/2:(H-h)/2[v{idx}]"
         last = f"[v{idx}]"
 
+    # Scale na output rezoluciju (smanjuje CPU za libx264)
+    chain += f";{last}scale={OUTPUT_W}:{OUTPUT_H}[out]"
+    last = "[out]"
+
     return [
         "ffmpeg", "-hide_banner", *inputs,
         "-filter_complex", chain, "-map", last, "-map", "0:a",
         "-c:v", "libx264", "-preset", "veryfast", "-g", "60",
-        "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "9000k",
+        "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "2400k",
         "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "44100",
         "-f", "flv", "-rtmp_live", "live", rtmp,
     ]
@@ -400,16 +406,25 @@ def build_video_cmd(config, video_path, seek=0.0):
         chain += f";[2:v]scale=-1:{LOGO_H}[logo];{last}[logo]overlay={LOGO_X}:{LOGO_Y}[v1]"
         last = "[v1]"
 
+    chain += f";{last}scale={OUTPUT_W}:{OUTPUT_H}[out]"
+    last = "[out]"
+
+    # Fade-out zvuka u zadnjim 2 sekundama videa
+    dur = get_video_duration(video_path)
+    audio_args = ["-map", "1:a"]
+    if dur and dur > 3:
+        audio_args += ["-af", f"afade=t=out:st={dur - 2:.2f}:d=2"]
+
     return [
         "ffmpeg", "-hide_banner",
         *bg_args,
         "-re", "-i", str(video_path),
         *extra_inputs,
         "-filter_complex", chain,
-        "-map", last, "-map", "1:a",
+        "-map", last, *audio_args,
         "-shortest",
         "-c:v", "libx264", "-preset", "veryfast", "-g", "60",
-        "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "9000k",
+        "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "2400k",
         "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "44100",
         "-f", "flv", "-rtmp_live", "live", rtmp,
     ]
