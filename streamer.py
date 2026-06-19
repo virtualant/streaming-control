@@ -178,20 +178,12 @@ def find_video(title):
 
     nt = _norm(title)
 
-    # 5-char substring match (handles typos / partial names)
+    # Egzaktan match po normaliziranom imenu (bez razmaka/podvlaka/točaka)
     for path in candidates:
-        nn = _norm(path.stem)
-        for i in range(max(0, len(nt) - 4)):
-            if nt[i:i+5] in nn:
-                return path
+        if _norm(path.stem) == nt:
+            return path
 
-    # Fallback: sequence ratio
-    best, best_r = None, 0.0
-    for path in candidates:
-        r = SequenceMatcher(None, nt, _norm(path.stem)).ratio()
-        if r > best_r:
-            best_r, best = r, path
-    return best if best_r > 0.5 else None
+    return None
 
 
 # ── FFmpeg helpers ────────────────────────────────────────────────────────────
