@@ -13,6 +13,12 @@ import time
 from difflib import SequenceMatcher
 from pathlib import Path
 
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    _PILLOW = True
+except ImportError:
+    _PILLOW = False
+
 BASE_DIR      = Path(__file__).parent
 CONFIG_FILE   = BASE_DIR / "config.json"
 SCHEDULE_FILE = BASE_DIR / "schedule.json"
@@ -28,6 +34,7 @@ PID_FILE      = BASE_DIR / ".streamer.pid"
 LOG_FILE      = BASE_DIR / "streamer.log"
 OVERLAY_DIR         = BASE_DIR / ".overlay"
 OVERLAY_SLOTS       = 7  # header + 6 schedule lines
+SCHEDULE_PNG        = BASE_DIR / ".schedule_overlay.png"
 PICTURE_OVERLAY     = BASE_DIR / "picture-overlay"
 SELECTED_IMAGE_FILE = BASE_DIR / ".selected_image"
 CONTROL_FILE        = BASE_DIR / ".control"
@@ -189,8 +196,60 @@ def find_video(title):
 
 # ── FFmpeg helpers ────────────────────────────────────────────────────────────
 
+def render_schedule_png(schedule):
+    """Generiraj PNG s rasporedom koristeći Pillow — jeftinije od 7x drawtext u FFmPegu."""
+    if not _PILLOW:
+        return
+    now = datetime.datetime.now()
+    cutoff = now + datetime.timedelta(hours=5)
+    upcoming = [
+        u for u in get_upcoming(schedule, limit=6, now=now)
+        if u["dt"] <= cutoff
+    ]
+
+    def fmt(u):
+        title = u['item'].get('display_title') or u['item']['title']
+        if len(title) > 90:
+            title = title[:88] + ".."
+        return f"{u['label']}  {title}"
+
+    lines = [fmt(u) for u in upcoming]
+
+    # Dimenzije: lijeva strana 1920x1080 platna (do ~580px širine)
+    IMG_W, IMG_H = 560, 1080
+    img = Image.new("RGBA", (IMG_W, IMG_H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Pokušaj učitati font, fallback na default
+    try:
+        font_header = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 42)
+        font_body   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 38)
+    except Exception:
+        font_header = ImageFont.load_default()
+        font_body   = font_header
+
+    def draw_text_shadow(d, pos, text, font, color=(255, 255, 255, 220)):
+        x, y = pos
+        # sjena
+        d.text((x + 2, y + 2), text, font=font, fill=(0, 0, 0, 180))
+        # tekst
+        d.text((x, y), text, font=font, fill=color)
+
+    # Header: "TSETSE TV" (logo ide zasebno u FFmpeg filteru)
+    draw_text_shadow(draw, (60, 60), "TSETSE TV", font_header)
+
+    # Schedule linije
+    for i, line in enumerate(lines):
+        y = 60 + (i + 1) * 58
+        draw_text_shadow(draw, (60, y), line, font_body)
+
+    # Atomski zapis — zamijeni stari fajl odjednom
+    tmp = SCHEDULE_PNG.with_suffix(".tmp.png")
+    img.save(str(tmp), "PNG")
+    tmp.replace(SCHEDULE_PNG)
+
 def write_overlay_files(schedule):
-    """Write per-slot text files that FFmpeg re-reads every frame via reload=1."""
+    """Generiraj schedule PNG (Pillow) i fallback text fajlove."""
     OVERLAY_DIR.mkdir(exist_ok=True)
     now = datetime.datetime.now()
     cutoff = now + datetime.timedelta(hours=5)
@@ -206,10 +265,11 @@ def write_overlay_files(schedule):
         return f"{u['label']}  {title}"
 
     lines = [fmt(u) for u in upcoming]
-    # Slot 0 = header, slots 1-5 = schedule lines (blank if unused)
     slots = ["TSETSE TV"] + lines + [""] * (OVERLAY_SLOTS - 1 - len(lines))
     for i, text in enumerate(slots[:OVERLAY_SLOTS]):
         (OVERLAY_DIR / f"line{i}.txt").write_text(text)
+
+    render_schedule_png(schedule)
 
 def get_picture_overlay():
     """Return the selected image from picture-overlay/, or None."""
@@ -351,45 +411,63 @@ def compute_pip_box(video_path):
     pip_y -= pip_y % 2
     return pip_w, pip_h, pip_x, pip_y
 
+def _schedule_overlay_inputs_and_chain(base_label, start_idx):
+    """
+    Vrati (extra_inputs, chain_fragment, last_label, next_idx) za schedule PNG overlay.
+    Ako PNG ne postoji ili Pillow nije dostupan, vrati drawtext fallback.
+    """
+    if _PILLOW and SCHEDULE_PNG.exists():
+        inputs = ["-loop", "1", "-i", str(SCHEDULE_PNG)]
+        chain = f";[{start_idx}:v]overlay=0:0[{base_label}s]"
+        return inputs, chain, f"[{base_label}s]", start_idx + 1
+    else:
+        # Fallback: stari drawtext
+        text_filters = [_drawtext_file(0, 60, 60, size=42, color="white")]
+        for i in range(1, OVERLAY_SLOTS):
+            text_filters.append(_drawtext_file(i, 60, 60 + i * 58, size=38))
+        chain = f"[{base_label}]{','.join(text_filters)}[{base_label}t]"
+        return [], ";" + chain, f"[{base_label}t]", start_idx
+
 def build_idle_cmd(config, picture=None, seek=0.0):
-    """Idle ekran: statična pozadina + drawtext + logo + opcionalna slika + bg audio loop → YouTube."""
+    """Idle ekran: bg video + PNG overlay rasporeda + logo + opcionalna slika → YouTube."""
     rtmp = f"{config['youtube_rtmp']}/{config['stream_key']}"
 
-    text_filters = [_drawtext_file(0, 60, 60, size=42, color="white")]
-    for i in range(1, OVERLAY_SLOTS):
-        text_filters.append(_drawtext_file(i, 60, 60 + i * 58, size=38))
-    text_chain = ",".join(text_filters)
-
-    # Input [0] = background video (loop), [1] = audio loop, [2..] = logo/picture
+    # Input [0] = background video (loop), [1] = audio loop, [2..] = overlay/logo/picture
     inputs = ["-re", "-stream_loop", "-1", "-i", str(BACKGROUND)]
 
-    # Audio: poseban file ako postoji, inače iz background.mp4
+    # Audio
     if BACKGROUND_AUDIO.exists():
         inputs += ["-stream_loop", "-1", "-i", str(BACKGROUND_AUDIO)]
         audio_map = "1:a"
     else:
         audio_map = "0:a"
 
+    idx = 2
+    chain = "[0:v][v0_raw];" \
+            "[v0_raw]null[v0]"  # placeholder, zamijenimo ispod
+    # Reset: jednostavan start
+    chain = "[0:v]null[v0]"
+    last = "[v0]"
+
+    # Schedule PNG overlay
+    sched_inputs, sched_chain, last, idx = _schedule_overlay_inputs_and_chain("v0", idx)
+    inputs += sched_inputs
+    chain += sched_chain
+
+    # Logo
     has_logo = LOGO_FILE.exists()
     if has_logo:
         inputs += ["-loop", "1", "-i", str(LOGO_FILE)]
-    if picture:
-        inputs += ["-loop", "1", "-i", str(picture)]
-
-    # Sastavi filter_complex
-    # Input indeksi: [0]=bg, [1]=audio, [2]=logo (ako), [3]=picture (ako)
-    chain = f"[0:v]{text_chain}[v0]"
-    last = "[v0]"
-    idx = 2
-    if has_logo:
         chain += f";[{idx}:v]scale=-1:{LOGO_H}[logo];{last}[logo]overlay={LOGO_X}:{LOGO_Y}[vl]"
         last = "[vl]"
         idx += 1
+
+    # Picture overlay
     if picture:
+        inputs += ["-loop", "1", "-i", str(picture)]
         chain += f";{last}[{idx}:v]overlay=(W-w)/2:(H-h)/2[vp]"
         last = "[vp]"
 
-    # Scale na output rezoluciju (smanjuje CPU za libx264)
     chain += f";{last}scale={OUTPUT_W}:{OUTPUT_H}[out]"
     last = "[out]"
 
@@ -397,44 +475,49 @@ def build_idle_cmd(config, picture=None, seek=0.0):
         "ffmpeg", "-hide_banner", *inputs,
         "-filter_complex", chain, "-map", last, "-map", audio_map,
         "-af", "aresample=async=1000:first_pts=0",
-        "-c:v", "libx264", "-preset", "superfast", "-r", "20", "-g", "40",
-        "-b:v", "900k", "-maxrate", "900k", "-bufsize", "1800k",
+        "-c:v", "libx264", "-preset", "superfast", "-r", "25", "-g", "50",
+        "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "2400k",
         "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "48000",
         "-f", "flv", "-rtmp_live", "live", rtmp,
     ]
 
 def build_video_cmd(config, video_path, seek=0.0):
-    """Video u PIP boxu na statičnoj pozadini + drawtext overlay → YouTube."""
+    """Video u PIP boxu na statičnoj pozadini + PNG overlay rasporeda + logo → YouTube."""
     rtmp = f"{config['youtube_rtmp']}/{config['stream_key']}"
 
     pip_w, pip_h, pip_x, pip_y = compute_pip_box(video_path)
     pip_vf = f"scale={pip_w}:{pip_h}:force_original_aspect_ratio=decrease,pad={pip_w}:{pip_h}:(ow-iw)/2:(oh-ih)/2:black"
 
-    text_filters = [_drawtext_file(0, 60, 60, size=42, color="white")]
-    for i in range(1, OVERLAY_SLOTS):
-        text_filters.append(_drawtext_file(i, 60, 60 + i * 58, size=38))
-    text_chain = ",".join(text_filters)
-
-    # Statična slika kao pozadina umjesto background.mp4 — nema dekodiranja u realtime
+    # Statična slika kao pozadina — nema dekodiranja videa u realtime
     bg_input = str(BACKGROUND_STILL) if BACKGROUND_STILL.exists() else str(BACKGROUND)
     if BACKGROUND_STILL.exists():
-        bg_args = ["-loop", "1", "-framerate", "30", "-i", bg_input]
+        bg_args = ["-loop", "1", "-framerate", "25", "-i", bg_input]
     else:
         bg_args = ["-re", "-stream_loop", "-1", "-i", bg_input]
 
-    # Inputs: [0]=bg, [1]=video, [2]=logo (ako postoji)
-    has_logo = LOGO_FILE.exists()
+    # Inputs: [0]=bg, [1]=video, [2+]=schedule PNG / logo
+    extra_inputs = []
+    idx = 2
+
     chain = (
-        f"[0:v]{text_chain}[bg];"
+        f"[0:v]null[bg];"
         f"[1:v]{pip_vf}[pip];"
         f"[bg][pip]overlay={pip_x}:{pip_y}[v0]"
     )
     last = "[v0]"
-    extra_inputs = []
+
+    # Schedule PNG overlay
+    sched_inputs, sched_chain, last, idx = _schedule_overlay_inputs_and_chain("v0", idx)
+    extra_inputs += sched_inputs
+    chain += sched_chain
+
+    # Logo
+    has_logo = LOGO_FILE.exists()
     if has_logo:
         extra_inputs += ["-loop", "1", "-i", str(LOGO_FILE)]
-        chain += f";[2:v]scale=-1:{LOGO_H}[logo];{last}[logo]overlay={LOGO_X}:{LOGO_Y}[v1]"
+        chain += f";[{idx}:v]scale=-1:{LOGO_H}[logo];{last}[logo]overlay={LOGO_X}:{LOGO_Y}[v1]"
         last = "[v1]"
+        idx += 1
 
     chain += f";{last}scale={OUTPUT_W}:{OUTPUT_H}[out]"
     last = "[out]"
