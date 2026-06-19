@@ -342,9 +342,6 @@ def build_idle_cmd(config, picture=None, seek=0.0):
     text_chain = ",".join(text_filters)
 
     inputs = [*seek_args, "-re", "-stream_loop", "-1", "-i", str(BACKGROUND)]
-    # Tihi audio (anullsrc) umjesto background audio — izbjegava non-monotonic DTS pri loopu
-    silent_audio_idx = 1
-    inputs += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
     has_logo = LOGO_FILE.exists()
     if has_logo:
         inputs += ["-loop", "1", "-i", str(LOGO_FILE)]
@@ -352,10 +349,10 @@ def build_idle_cmd(config, picture=None, seek=0.0):
         inputs += ["-loop", "1", "-i", str(picture)]
 
     # Sastavi filter_complex prema prisutnosti loga i slike
-    # Input indeksi: [0]=background, [1]=anullsrc, [2]=logo (ako), [3]=picture (ako)
+    # Input indeksi: [0]=background, [1]=logo (ako), [2]=picture (ako)
     chain = f"[0:v]{text_chain}[v0]"
     last = "[v0]"
-    idx = 2  # logo/picture inputs počinju nakon anullsrc-a
+    idx = 1
     if has_logo:
         chain += f";[{idx}:v]scale=-1:{LOGO_H}[logo];{last}[logo]overlay={LOGO_X}:{LOGO_Y}[vl]"
         last = "[vl]"
@@ -370,7 +367,8 @@ def build_idle_cmd(config, picture=None, seek=0.0):
 
     return [
         "ffmpeg", "-hide_banner", *inputs,
-        "-filter_complex", chain, "-map", last, "-map", f"{silent_audio_idx}:a",
+        "-filter_complex", chain, "-map", last, "-map", "0:a",
+        "-af", "aresample=async=1000:first_pts=0",
         "-c:v", "libx264", "-preset", "ultrafast", "-g", "60",
         "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "2400k",
         "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "44100",
