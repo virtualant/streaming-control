@@ -446,7 +446,7 @@ def build_idle_cmd(config, picture=None, seek=0.0):
     chain = "[0:v][v0_raw];" \
             "[v0_raw]null[v0]"  # placeholder, zamijenimo ispod
     # Reset: jednostavan start
-    chain = "[0:v]null[v0]"
+    chain = "[0:v]scale=1920:1080[v0]"
     last = "[v0]"
 
     # Schedule PNG overlay
@@ -501,7 +501,7 @@ def build_video_cmd(config, video_path, seek=0.0):
     idx = 2
 
     chain = (
-        f"[0:v]null[bg];"
+        f"[0:v]scale=1920:1080[bg];"
         f"[1:v]{pip_vf}[pip];"
         f"[bg][pip]overlay={pip_x}:{pip_y}[v0]"
     )
