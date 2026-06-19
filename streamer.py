@@ -360,25 +360,15 @@ def build_idle_cmd(config, picture=None, seek=0.0):
         text_filters.append(_drawtext_file(i, 60, 60 + i * 58, size=38))
     text_chain = ",".join(text_filters)
 
-    # Input [0] = statična slika (besplatno dekodiranje), [1] = audio loop, [2..] = logo/picture
-    use_still = BACKGROUND_STILL.exists()
-    bg_video_input = str(BACKGROUND_STILL) if use_still else str(BACKGROUND)
-    if use_still:
-        inputs = ["-loop", "1", "-framerate", "25", "-i", bg_video_input]
-    else:
-        inputs = ["-re", "-stream_loop", "-1", "-i", bg_video_input]
+    # Input [0] = background video (loop), [1] = audio loop, [2..] = logo/picture
+    inputs = ["-re", "-stream_loop", "-1", "-i", str(BACKGROUND)]
 
     # Audio: poseban file ako postoji, inače iz background.mp4
     if BACKGROUND_AUDIO.exists():
         inputs += ["-stream_loop", "-1", "-i", str(BACKGROUND_AUDIO)]
         audio_map = "1:a"
     else:
-        # bg je video → audio iz njega; bg je still → tihi audio
-        if use_still:
-            inputs += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
-            audio_map = "1:a"
-        else:
-            audio_map = "0:a"
+        audio_map = "0:a"
 
     has_logo = LOGO_FILE.exists()
     if has_logo:
