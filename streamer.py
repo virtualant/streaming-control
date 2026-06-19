@@ -418,7 +418,7 @@ def _schedule_overlay_inputs_and_chain(base_label, start_idx):
     """
     if _PILLOW and SCHEDULE_PNG.exists():
         inputs = ["-loop", "1", "-i", str(SCHEDULE_PNG)]
-        chain = f";[{start_idx}:v]overlay=0:0[{base_label}s]"
+        chain = f";[{base_label}][{start_idx}:v]overlay=0:0[{base_label}s]"
         return inputs, chain, f"[{base_label}s]", start_idx + 1
     else:
         # Fallback: stari drawtext
