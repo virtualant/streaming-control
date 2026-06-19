@@ -37,7 +37,7 @@ PIP_X, PIP_Y = 640,  191   # x=640 ostavlja 580px za overlay, y centriran
 DEFAULT_CONFIG = {
     "youtube_rtmp": "rtmp://a.rtmp.youtube.com/live2",
     "stream_key": "YOUR_STREAM_KEY_HERE",
-    "bitrate": "1200k",
+    "bitrate": "1500k",
     "audio_bitrate": "128k",
 }
 
@@ -369,9 +369,9 @@ def build_idle_cmd(config, picture=None, seek=0.0):
         "ffmpeg", "-hide_banner", *inputs,
         "-filter_complex", chain, "-map", last, "-map", "0:a",
         "-af", "aresample=async=1000:first_pts=0",
-        "-c:v", "libx264", "-preset", "ultrafast", "-g", "60",
+        "-c:v", "libx264", "-preset", "veryfast", "-g", "60",
         "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "2400k",
-        "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "44100",
+        "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "48000",
         "-f", "flv", "-rtmp_live", "live", rtmp,
     ]
 
@@ -425,9 +425,9 @@ def build_video_cmd(config, video_path, seek=0.0):
         "-filter_complex", chain,
         "-map", last, *audio_args,
         "-shortest",
-        "-c:v", "libx264", "-preset", "ultrafast", "-g", "60",
+        "-c:v", "libx264", "-preset", "veryfast", "-g", "60",
         "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "2400k",
-        "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "44100",
+        "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "48000",
         "-f", "flv", "-rtmp_live", "live", rtmp,
     ]
 
