@@ -19,6 +19,7 @@ SCHEDULE_FILE = BASE_DIR / "schedule.json"
 VIDEOS_DIR    = BASE_DIR / "videos"
 BACKGROUND    = BASE_DIR / "background.mp4"
 BACKGROUND_STILL = BASE_DIR / ".background_still.jpg"
+BACKGROUND_AUDIO = BASE_DIR / ".background_audio.aac"
 LOGO_FILE        = BASE_DIR / "muha-mini.png"
 LOGO_H           = 70    # visina loga u px
 LOGO_X           = 310   # desno od "TSETSE TV" teksta
@@ -252,6 +253,25 @@ def ensure_background_still():
     ]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+def ensure_background_audio():
+    """Izvuci audio iz background.mp4 jednom — koristi se u idle modu umjesto cijelog videa."""
+    if BACKGROUND_AUDIO.exists():
+        return
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner",
+        "-i", str(BACKGROUND),
+        "-vn", "-c:a", "copy",
+        str(BACKGROUND_AUDIO),
+    ]
+    r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if r.returncode != 0:
+        # Fallback: re-encode if copy fails (e.g. unsupported codec)
+        subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-i", str(BACKGROUND),
+             "-vn", "-c:a", "aac", "-b:a", "128k", str(BACKGROUND_AUDIO)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
 def get_bg_duration():
     """Probe background.mp4 duration once so we can seek to the right loop position."""
     result = subprocess.run(
@@ -332,27 +352,45 @@ def compute_pip_box(video_path):
     return pip_w, pip_h, pip_x, pip_y
 
 def build_idle_cmd(config, picture=None, seek=0.0):
-    """Idle ekran: background loop + drawtext + logo + opcionalna slika → YouTube."""
+    """Idle ekran: statična pozadina + drawtext + logo + opcionalna slika + bg audio loop → YouTube."""
     rtmp = f"{config['youtube_rtmp']}/{config['stream_key']}"
-    seek_args = ["-ss", f"{seek:.2f}"] if seek > 0 else []
 
     text_filters = [_drawtext_file(0, 60, 60, size=42, color="white")]
     for i in range(1, OVERLAY_SLOTS):
         text_filters.append(_drawtext_file(i, 60, 60 + i * 58, size=38))
     text_chain = ",".join(text_filters)
 
-    inputs = [*seek_args, "-re", "-stream_loop", "-1", "-i", str(BACKGROUND)]
+    # Input [0] = statična slika (besplatno dekodiranje), [1] = audio loop, [2..] = logo/picture
+    use_still = BACKGROUND_STILL.exists()
+    bg_video_input = str(BACKGROUND_STILL) if use_still else str(BACKGROUND)
+    if use_still:
+        inputs = ["-loop", "1", "-framerate", "25", "-i", bg_video_input]
+    else:
+        inputs = ["-re", "-stream_loop", "-1", "-i", bg_video_input]
+
+    # Audio: poseban file ako postoji, inače iz background.mp4
+    if BACKGROUND_AUDIO.exists():
+        inputs += ["-stream_loop", "-1", "-i", str(BACKGROUND_AUDIO)]
+        audio_map = "1:a"
+    else:
+        # bg je video → audio iz njega; bg je still → tihi audio
+        if use_still:
+            inputs += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+            audio_map = "1:a"
+        else:
+            audio_map = "0:a"
+
     has_logo = LOGO_FILE.exists()
     if has_logo:
         inputs += ["-loop", "1", "-i", str(LOGO_FILE)]
     if picture:
         inputs += ["-loop", "1", "-i", str(picture)]
 
-    # Sastavi filter_complex prema prisutnosti loga i slike
-    # Input indeksi: [0]=background, [1]=logo (ako), [2]=picture (ako)
+    # Sastavi filter_complex
+    # Input indeksi: [0]=bg, [1]=audio, [2]=logo (ako), [3]=picture (ako)
     chain = f"[0:v]{text_chain}[v0]"
     last = "[v0]"
-    idx = 1
+    idx = 2
     if has_logo:
         chain += f";[{idx}:v]scale=-1:{LOGO_H}[logo];{last}[logo]overlay={LOGO_X}:{LOGO_Y}[vl]"
         last = "[vl]"
@@ -367,7 +405,7 @@ def build_idle_cmd(config, picture=None, seek=0.0):
 
     return [
         "ffmpeg", "-hide_banner", *inputs,
-        "-filter_complex", chain, "-map", last, "-map", "0:a",
+        "-filter_complex", chain, "-map", last, "-map", audio_map,
         "-af", "aresample=async=1000:first_pts=0",
         "-c:v", "libx264", "-preset", "superfast", "-r", "25", "-g", "50",
         "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "2400k",
@@ -553,6 +591,7 @@ class Streamer:
         VIDEOS_DIR.mkdir(exist_ok=True)
         self.bg_duration = get_bg_duration()
         ensure_background_still()
+        ensure_background_audio()
         self._idle()
 
         while self.running:
