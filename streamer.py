@@ -215,8 +215,8 @@ def render_schedule_png(schedule):
 
     lines = [fmt(u) for u in upcoming]
 
-    # Dimenzije: lijeva strana 1920x1080 platna (do ~580px širine)
-    IMG_W, IMG_H = 560, 1080
+    # PNG u veličini cijelog platna — text lijevo, ostatak transparentan
+    IMG_W, IMG_H = 1920, 1080
     img = Image.new("RGBA", (IMG_W, IMG_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
