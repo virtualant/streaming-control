@@ -696,6 +696,11 @@ class Streamer:
             if CONTROL_FILE.exists():
                 cmd = CONTROL_FILE.read_text().strip()
                 CONTROL_FILE.unlink(missing_ok=True)
+                if cmd == "refresh":
+                    log.info("CLI refresh: regeneriram overlay i restartam stream")
+                    if self.mode == "idle":
+                        self._idle()
+                    continue
                 if cmd == "skip" and self.mode == "video":
                     log.info(f"CLI skip: prekidam video {self.playing_key}")
                     # Ukloni samo ako je jednokratan
@@ -917,6 +922,16 @@ def cmd_next(_args):
     print(f"Pokrećem '{title}' (u sljedećih 5s).")
 
 
+def cmd_refresh(_args):
+    """Prisilno regeneriraj schedule PNG overlay i restartaj FFmpeg da pokupi novu sliku."""
+    schedule = load_schedule()
+    write_overlay_files(schedule)
+    print("Schedule overlay regeneriran.")
+    if PID_FILE.exists():
+        CONTROL_FILE.write_text("refresh")
+        print("Restart streama zatražen (u sljedećih 5s).")
+
+
 def cmd_status(_args):
     if not PID_FILE.exists():
         print("Streamer: zaustavljen")
@@ -941,6 +956,7 @@ def main():
     sub.add_parser("list",   help="Prikaži raspored streamova")
     sub.add_parser("skip",   help="Prekini trenutni video, vrati na idle")
     sub.add_parser("next",   help="Odmah pokreni sljedeći video iz rasporeda")
+    sub.add_parser("refresh",help="Regeneriraj schedule overlay i restartaj stream")
 
     pa = sub.add_parser("add", help="Dodaj zakazani stream")
     pa.add_argument("title", help="Naziv datoteke za pretragu u videos/")
@@ -965,6 +981,7 @@ def main():
         "image":  cmd_image,
         "skip":   cmd_skip,
         "next":   cmd_next,
+        "refresh":cmd_refresh,
     }
     fn = dispatch.get(args.cmd)
     if fn:
