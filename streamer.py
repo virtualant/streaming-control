@@ -850,25 +850,36 @@ def cmd_list(_args):
         when = u["label"] if u else item.get("date", "?")
         repeat = "svaki dan" if not item.get("date") else "jednom"
         title = (item.get('display_title') or item['title'])[:40]
-        video = find_video(item["title"])
+        # Multi-video queue: sumiraj trajanja svih videa
+        titles = expand_title_to_queue(item["title"])
+        total_dur = 0.0
+        missing = False
+        for t in titles:
+            v = find_video(t)
+            if not v:
+                missing = True
+                continue
+            d = get_video_duration(v)
+            if d:
+                total_dur += d
         duration_str = "?"
         end_str = "?"
-        if video:
-            dur = get_video_duration(video)
-            if dur:
-                mins = int(dur // 60)
-                secs = int(dur % 60)
-                duration_str = f"{mins}m {secs:02d}s"
-                if u:
-                    end_dt = u["dt"] + datetime.timedelta(seconds=dur)
-                    days = (end_dt.date() - now.date()).days
-                    if days == 0:
-                        end_str = end_dt.strftime("%H:%M")
-                    elif days == 1:
-                        end_str = f"Sutra {end_dt.strftime('%H:%M')}"
-                    else:
-                        end_str = end_dt.strftime("%a %H:%M")
-        else:
+        if total_dur > 0:
+            mins = int(total_dur // 60)
+            secs = int(total_dur % 60)
+            duration_str = f"{mins}m {secs:02d}s"
+            if missing:
+                duration_str += "*"
+            if u:
+                end_dt = u["dt"] + datetime.timedelta(seconds=total_dur)
+                days = (end_dt.date() - now.date()).days
+                if days == 0:
+                    end_str = end_dt.strftime("%H:%M")
+                elif days == 1:
+                    end_str = f"Sutra {end_dt.strftime('%H:%M')}"
+                else:
+                    end_str = end_dt.strftime("%a %H:%M")
+        elif missing:
             duration_str = "nema"
         print(f"  {i:>3}   {when:<18}   {duration_str:<9}   {end_str:<11}   {repeat:<11}   {title}")
     print()
