@@ -169,7 +169,7 @@ def _norm(s):
     return s.lower().replace(" ", "").replace("_", "").replace("-", "").replace(".", "")
 
 def find_video(title):
-    """Fuzzy-match title against filenames in videos/. 5-char substring wins."""
+    """Egzaktan match po normaliziranom imenu (bez razmaka/podvlaka/točaka)."""
     if not VIDEOS_DIR.exists():
         return None
     candidates = list(VIDEOS_DIR.glob("**/*.mp4")) + list(VIDEOS_DIR.glob("**/*.mkv"))
@@ -177,13 +177,30 @@ def find_video(title):
         return None
 
     nt = _norm(title)
-
-    # Egzaktan match po normaliziranom imenu (bez razmaka/podvlaka/točaka)
     for path in candidates:
         if _norm(path.stem) == nt:
             return path
-
     return None
+
+def expand_title_to_queue(title):
+    """
+    Razdvoji title u listu naslova:
+    - 'a, b, c' → ['a', 'b', 'c']
+    - 'a x3' ili 'a×3' → ['a', 'a', 'a']
+    Kombinacije: 'a x2, b' → ['a', 'a', 'b']
+    """
+    import re
+    parts = [p.strip() for p in title.split(",") if p.strip()]
+    queue = []
+    for p in parts:
+        m = re.match(r"^(.*?)\s*[x×]\s*(\d+)\s*$", p, re.IGNORECASE)
+        if m:
+            base = m.group(1).strip()
+            count = int(m.group(2))
+            queue.extend([base] * count)
+        else:
+            queue.append(p)
+    return queue
 
 
 # ── FFmpeg helpers ────────────────────────────────────────────────────────────
@@ -609,6 +626,8 @@ class Streamer:
         self.idle_started_at = 0.0
         self.bg_duration     = 30.0
         self.running         = True
+        self.queue           = []      # preostali videi iz multi-naslov scheduled itema
+        self.queue_item      = None    # scheduled item iz kojeg je queue nastao
         signal.signal(signal.SIGTERM, self._shutdown)
         signal.signal(signal.SIGINT,  self._shutdown)
 
@@ -682,11 +701,23 @@ class Streamer:
             if self.proc and self.proc.poll() is not None:
                 if self.mode == "video":
                     log.info(f"Video završio: {self.playing_key}")
+                    # Queue: pokreni sljedeći video iz iste schedule stavke
+                    if self.queue:
+                        next_title = self.queue.pop(0)
+                        next_video = find_video(next_title)
+                        if next_video:
+                            log.info(f"Queue: sljedeći '{next_title}' ({len(self.queue)} preostalo)")
+                            self._play(self.queue_item, next_video)
+                            continue
+                        log.warning(f"Queue: video nije pronađen za '{next_title}', preskačem")
+                    # Queue prazan ili pao — ukloni jednokratan stavku i nazad na idle
                     schedule = [
                         s for s in schedule
                         if not (item_key(s) == self.playing_key and s.get("date"))
                     ]
                     save_schedule(schedule)
+                    self.queue = []
+                    self.queue_item = None
                 else:
                     log.warning("Idle stream pao, restartanje")
                 self._idle()
@@ -710,18 +741,24 @@ class Streamer:
                             if not (item_key(s) == self.playing_key and s.get("date"))
                         ]
                         save_schedule(schedule)
+                    self.queue = []
+                    self.queue_item = None
                     self._idle()
                     continue
                 if cmd == "next":
                     upcoming = get_upcoming(schedule, limit=1, now=now)
                     if upcoming:
                         nxt = upcoming[0]["item"]
-                        video = find_video(nxt["title"])
+                        titles = expand_title_to_queue(nxt["title"])
+                        first = titles[0] if titles else nxt["title"]
+                        video = find_video(first)
                         if video:
                             log.info(f"CLI next: pokrećem '{nxt['title']}'")
+                            self.queue = titles[1:]
+                            self.queue_item = nxt
                             self._play(nxt, video)
                             continue
-                        log.warning(f"CLI next: video nije pronađen za '{nxt['title']}'")
+                        log.warning(f"CLI next: video nije pronađen za '{first}'")
                     else:
                         log.info("CLI next: nema sljedećih u rasporedu")
 
@@ -733,8 +770,12 @@ class Streamer:
                         break
                     if self.played_today.get(key) == today:
                         break
-                    video = find_video(item["title"])
+                    titles = expand_title_to_queue(item["title"])
+                    first = titles[0] if titles else item["title"]
+                    video = find_video(first)
                     if video:
+                        self.queue = titles[1:]
+                        self.queue_item = item
                         self._play(item, video)
                     else:
                         log.warning(f"Video nije pronađen: {item['title']}")
