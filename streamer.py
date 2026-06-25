@@ -47,6 +47,7 @@ DEFAULT_CONFIG = {
     "stream_key": "YOUR_STREAM_KEY_HERE",
     "bitrate": "1500k",
     "audio_bitrate": "128k",
+    "framerate": 25,
 }
 
 OUTPUT_W, OUTPUT_H = 1280, 720
@@ -484,7 +485,7 @@ def build_idle_cmd(config, picture=None, seek=0.0):
         "ffmpeg", "-hide_banner", *inputs,
         "-filter_complex", chain, "-map", last, "-map", audio_map,
         "-af", "aresample=async=1000:first_pts=0",
-        "-c:v", "libx264", "-preset", "superfast", "-r", "25", "-g", "50",
+        "-c:v", "libx264", "-preset", "superfast", "-r", str(config.get("framerate", 25)), "-g", str(int(config.get("framerate", 25)) * 2),
         "-threads", "4", "-x264-params", "threads=4:sliced-threads=1",
         "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "2400k",
         "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "48000",
@@ -546,7 +547,7 @@ def build_video_cmd(config, video_path, seek=0.0):
         "-filter_complex", chain,
         "-map", last, *audio_args,
         "-shortest",
-        "-c:v", "libx264", "-preset", "superfast", "-r", "25", "-g", "50",
+        "-c:v", "libx264", "-preset", "superfast", "-r", str(config.get("framerate", 25)), "-g", str(int(config.get("framerate", 25)) * 2),
         "-threads", "4", "-x264-params", "threads=4:sliced-threads=1",
         "-b:v", config["bitrate"], "-maxrate", config["bitrate"], "-bufsize", "2400k",
         "-c:a", "aac", "-b:a", config["audio_bitrate"], "-ar", "48000",
