@@ -8,7 +8,8 @@
       "Bash(git commit *)",
       "Bash(python -c \"import streamer\")",
       "Bash(python -c \"import streamer; print\\('OK'\\); print\\(streamer.expand_title_to_queue\\('video x3'\\)\\); print\\(streamer.expand_title_to_queue\\('a, b, c'\\)\\); print\\(streamer.expand_title_to_queue\\('a x2, b'\\)\\)\")",
-      "Bash(python -c \"import streamer; print\\('OK'\\)\")"
+      "Bash(python -c \"import streamer; print\\('OK'\\)\")",
+      "Bash(python -c \"import streamer; print\\('OK'\\); print\\(streamer.parse_offset\\('05:00'\\), streamer.parse_offset\\('1:30:00'\\)\\)\")"
     ]
   }
 }
