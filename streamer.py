@@ -492,7 +492,7 @@ def build_idle_cmd(config, picture=None, seek=0.0):
         "-f", "flv", "-rtmp_live", "live", rtmp,
     ]
 
-def build_video_cmd(config, video_path, seek=0.0):
+def build_video_cmd(config, video_path, seek=0.0, video_start=0):
     """Video u PIP boxu na statičnoj pozadini + PNG overlay rasporeda + logo → YouTube."""
     rtmp = f"{config['youtube_rtmp']}/{config['stream_key']}"
 
@@ -535,13 +535,16 @@ def build_video_cmd(config, video_path, seek=0.0):
 
     # Fade-out zvuka u zadnjim 2 sekundama videa
     dur = get_video_duration(video_path)
+    effective_dur = (dur - video_start) if dur else None
     audio_args = ["-map", "1:a"]
-    if dur and dur > 3:
-        audio_args += ["-af", f"afade=t=out:st={dur - 2:.2f}:d=2"]
+    if effective_dur and effective_dur > 3:
+        # afade pozicija je relativna na output (od trenutka kad start kreće)
+        audio_args += ["-af", f"afade=t=out:st={effective_dur - 2:.2f}:d=2"]
 
     return [
         "ffmpeg", "-hide_banner",
         *bg_args,
+        *(["-ss", str(video_start)] if video_start > 0 else []),
         "-re", "-i", str(video_path),
         *extra_inputs,
         "-filter_complex", chain,
@@ -659,11 +662,11 @@ class Streamer:
         # Postavi idle_started_at tako da seek koji smo dali odgovara sadašnjem trenutku
         self.idle_started_at = time.time() - seek
 
-    def _play(self, item, video_path):
+    def _play(self, item, video_path, video_start=0):
         seek = self._bg_seek()
         kill_ffmpeg(self.proc)
-        cmd = build_video_cmd(self.config, video_path, seek)
-        log.info(f"Video '{item['title']}' ({video_path.name})  bg_seek={seek:.1f}s")
+        cmd = build_video_cmd(self.config, video_path, seek, video_start=video_start)
+        log.info(f"Video '{item['title']}' ({video_path.name})  bg_seek={seek:.1f}s  start={video_start}s")
         self.proc = start_ffmpeg(cmd)
         self.mode = "video"
         self.playing_key = item_key(item)
@@ -757,7 +760,7 @@ class Streamer:
                             log.info(f"CLI next: pokrećem '{nxt['title']}'")
                             self.queue = titles[1:]
                             self.queue_item = nxt
-                            self._play(nxt, video)
+                            self._play(nxt, video, video_start=nxt.get("start_offset", 0))
                             continue
                         log.warning(f"CLI next: video nije pronađen za '{first}'")
                     else:
@@ -777,7 +780,8 @@ class Streamer:
                     if video:
                         self.queue = titles[1:]
                         self.queue_item = item
-                        self._play(item, video)
+                        # start_offset se primjenjuje samo na prvi video u queueu
+                        self._play(item, video, video_start=item.get("start_offset", 0))
                     else:
                         log.warning(f"Video nije pronađen: {item['title']}")
                     break
@@ -823,17 +827,38 @@ def cmd_stop(_args):
     PID_FILE.unlink(missing_ok=True)
 
 
+def parse_offset(s):
+    """Parsiraj 'MM:SS' ili 'HH:MM:SS' u sekunde. Vrati 0 ako prazno."""
+    if not s:
+        return 0
+    parts = s.strip().split(":")
+    try:
+        if len(parts) == 2:
+            m, sec = int(parts[0]), int(parts[1])
+            return m * 60 + sec
+        if len(parts) == 3:
+            h, m, sec = int(parts[0]), int(parts[1]), int(parts[2])
+            return h * 3600 + m * 60 + sec
+    except ValueError:
+        pass
+    raise ValueError(f"Neispravan format offseta: '{s}'. Koristi MM:SS ili HH:MM:SS.")
+
+
 def cmd_add(args):
     date_str, time_str = parse_time_arg(args.time)
     display_title = args.title if not args.title_override else args.title_override
+    start_offset = parse_offset(args.start) if args.start else 0
     schedule = load_schedule()
     entry = {"title": args.title, "display_title": display_title, "time": time_str, "date": date_str}
+    if start_offset > 0:
+        entry["start_offset"] = start_offset
     schedule.append(entry)
     save_schedule(schedule)
+    offset_str = f"  (od {args.start})" if start_offset else ""
     if date_str:
-        print(f"Dodano (jednom):    '{display_title}'  dana {date_str} u {time_str}")
+        print(f"Dodano (jednom):    '{display_title}'  dana {date_str} u {time_str}{offset_str}")
     else:
-        print(f"Dodano (svaki dan): '{display_title}'  svaki dan u {time_str}")
+        print(f"Dodano (svaki dan): '{display_title}'  svaki dan u {time_str}{offset_str}")
 
 
 def cmd_list(_args):
@@ -1016,6 +1041,8 @@ def main():
     pa.add_argument("time",  help="HH:MM, today HH:MM ili YYYY-MM-DD HH:MM")
     pa.add_argument("--title", dest="title_override", default=None, metavar="NASLOV",
                     help="Custom naslov koji se prikazuje na streamu")
+    pa.add_argument("--start", default=None, metavar="MM:SS",
+                    help="Offset od početka videa (npr. 05:00 za petu minutu)")
 
     pr = sub.add_parser("remove", help="Ukloni zakazani stream prema ID-u")
     pr.add_argument("id", type=int, help="ID iz 'stream list'")
