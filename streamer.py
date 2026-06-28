@@ -201,11 +201,28 @@ def _norm(s):
     return s.lower().replace(" ", "").replace("_", "").replace("-", "").replace(".", "")
 
 def find_video(title):
-    """Egzaktan match po normaliziranom imenu (bez razmaka/podvlaka/točaka)."""
+    """
+    Egzaktan match po normaliziranom imenu (bez razmaka/podvlaka/točaka).
+    Podržava i 'folder/ime' sintaksu za disambiguaciju kad isti naziv postoji
+    u više subfoldera.
+    """
     if not VIDEOS_DIR.exists():
         return None
     candidates = list(VIDEOS_DIR.glob("**/*.mp4")) + list(VIDEOS_DIR.glob("**/*.mkv"))
     if not candidates:
+        return None
+
+    # Folder/ime sintaksa
+    if "/" in title:
+        folder, name = title.split("/", 1)
+        nf, nn = _norm(folder), _norm(name)
+        for path in candidates:
+            try:
+                rel_folder = path.parent.relative_to(VIDEOS_DIR).as_posix()
+            except ValueError:
+                continue
+            if _norm(rel_folder) == nf and _norm(path.stem) == nn:
+                return path
         return None
 
     nt = _norm(title)
