@@ -91,35 +91,59 @@ def load_schedule():
 def save_schedule(schedule):
     SCHEDULE_FILE.write_text(json.dumps(schedule, indent=2))
 
+WEEKDAYS = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+    "ponedjeljak": 0, "utorak": 1, "srijeda": 2, "cetvrtak": 3, "četvrtak": 3,
+    "petak": 4, "subota": 5, "nedjelja": 6,
+}
+WEEKDAY_NAMES = ["pon", "uto", "sri", "čet", "pet", "sub", "ned"]
+
+
 def parse_time_arg(time_str):
-    """Return (date_str_or_None, 'HH:MM')"""
+    """Return (date_str_or_None, weekday_or_None, 'HH:MM')"""
     time_str = time_str.strip()
 
-    # "today HH:MM" → današnji datum
+    # "today HH:MM"
     if time_str.lower().startswith("today "):
         hm = time_str[6:].strip()
         try:
             datetime.datetime.strptime(hm, "%H:%M")
-            return datetime.date.today().isoformat(), hm
+            return datetime.date.today().isoformat(), None, hm
+        except ValueError:
+            pass
+
+    # "<weekday> HH:MM"
+    parts = time_str.split(maxsplit=1)
+    if len(parts) == 2 and parts[0].lower() in WEEKDAYS:
+        hm = parts[1].strip()
+        try:
+            datetime.datetime.strptime(hm, "%H:%M")
+            return None, WEEKDAYS[parts[0].lower()], hm
         except ValueError:
             pass
 
     for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
         try:
             dt = datetime.datetime.strptime(time_str, fmt)
-            return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
+            return dt.strftime("%Y-%m-%d"), None, dt.strftime("%H:%M")
         except ValueError:
             pass
     try:
         datetime.datetime.strptime(time_str, "%H:%M")
-        return None, time_str
+        return None, None, time_str
     except ValueError:
         raise ValueError(
-            f"Neispravan format vremena: '{time_str}'. Koristi HH:MM (svaki dan), today HH:MM ili YYYY-MM-DD HH:MM (jednom)."
+            f"Neispravan format vremena: '{time_str}'. Koristi HH:MM (svaki dan), today HH:MM, "
+            f"<dan> HH:MM (npr. friday 15:00) ili YYYY-MM-DD HH:MM (jednom)."
         )
 
 def item_key(item):
-    return (item["title"], item["time"], item.get("date"))
+    if item.get("type") == "random":
+        return ("random", tuple(item.get("folders", [])), item["time"],
+                item.get("date"), item.get("weekday"))
+    return (item["title"], item["time"], item.get("date"), item.get("weekday"))
 
 def next_occurrence(item, now):
     h, m = map(int, item["time"].split(":"))
@@ -128,6 +152,11 @@ def next_occurrence(item, now):
             hour=h, minute=m, second=0, microsecond=0
         )
     base = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if item.get("weekday") is not None:
+        days_ahead = (item["weekday"] - base.weekday()) % 7
+        if days_ahead == 0 and base <= now:
+            days_ahead = 7
+        return base + datetime.timedelta(days=days_ahead)
     if base <= now:
         base += datetime.timedelta(days=1)
     return base
@@ -159,6 +188,8 @@ def should_play_now(item, now=None):
             hour=h, minute=m, second=0, microsecond=0
         )
     else:
+        if item.get("weekday") is not None and now.weekday() != item["weekday"]:
+            return False
         scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
     diff = (now - scheduled).total_seconds()
     return 0 <= diff < 120
@@ -182,6 +213,57 @@ def find_video(title):
         if _norm(path.stem) == nt:
             return path
     return None
+
+def collect_videos_in_folders(folders):
+    """Vrati listu video path-ova iz navedenih subfoldera unutar videos/."""
+    paths = []
+    for f in folders:
+        d = VIDEOS_DIR / f.strip()
+        if d.is_dir():
+            paths += list(d.glob("**/*.mp4")) + list(d.glob("**/*.mkv"))
+    return paths
+
+def build_random_queue(folders, length_seconds):
+    """Random sekvenca videa iz foldera sve dok ukupno trajanje ne dosegne length_seconds."""
+    import random
+    candidates = collect_videos_in_folders(folders)
+    if not candidates:
+        return []
+    pool = candidates.copy()
+    random.shuffle(pool)
+    queue = []
+    total = 0.0
+    # Prva runda — bez ponavljanja
+    for c in pool:
+        if total >= length_seconds:
+            break
+        dur = get_video_duration(c) or 0
+        if dur <= 0:
+            continue
+        queue.append(c)
+        total += dur
+    # Ako još premalo, ponavljaj nasumično
+    while total < length_seconds:
+        c = random.choice(candidates)
+        dur = get_video_duration(c) or 0
+        if dur <= 0:
+            continue
+        queue.append(c)
+        total += dur
+    return queue
+
+def build_queue_for_item(item):
+    """Vrati listu Path-ova za scheduled stavku (fixed ili random)."""
+    if item.get("type") == "random":
+        length_sec = int(item.get("length_minutes", 60)) * 60
+        return build_random_queue(item.get("folders", []), length_sec)
+    titles = expand_title_to_queue(item["title"])
+    paths = []
+    for t in titles:
+        v = find_video(t)
+        if v:
+            paths.append(v)
+    return paths
 
 def expand_title_to_queue(title):
     """
@@ -707,13 +789,10 @@ class Streamer:
                     log.info(f"Video završio: {self.playing_key}")
                     # Queue: pokreni sljedeći video iz iste schedule stavke
                     if self.queue:
-                        next_title = self.queue.pop(0)
-                        next_video = find_video(next_title)
-                        if next_video:
-                            log.info(f"Queue: sljedeći '{next_title}' ({len(self.queue)} preostalo)")
-                            self._play(self.queue_item, next_video)
-                            continue
-                        log.warning(f"Queue: video nije pronađen za '{next_title}', preskačem")
+                        next_video = self.queue.pop(0)
+                        log.info(f"Queue: sljedeći '{next_video.name}' ({len(self.queue)} preostalo)")
+                        self._play(self.queue_item, next_video)
+                        continue
                     # Queue prazan ili pao — ukloni jednokratan stavku i nazad na idle
                     schedule = [
                         s for s in schedule
@@ -753,16 +832,14 @@ class Streamer:
                     upcoming = get_upcoming(schedule, limit=1, now=now)
                     if upcoming:
                         nxt = upcoming[0]["item"]
-                        titles = expand_title_to_queue(nxt["title"])
-                        first = titles[0] if titles else nxt["title"]
-                        video = find_video(first)
-                        if video:
-                            log.info(f"CLI next: pokrećem '{nxt['title']}'")
-                            self.queue = titles[1:]
+                        queue_paths = build_queue_for_item(nxt)
+                        if queue_paths:
+                            log.info(f"CLI next: pokrećem '{nxt.get('display_title') or nxt.get('title')}'")
+                            self.queue = queue_paths[1:]
                             self.queue_item = nxt
-                            self._play(nxt, video, video_start=nxt.get("start_offset", 0))
+                            self._play(nxt, queue_paths[0], video_start=nxt.get("start_offset", 0))
                             continue
-                        log.warning(f"CLI next: video nije pronađen za '{first}'")
+                        log.warning(f"CLI next: nema videa za stavku")
                     else:
                         log.info("CLI next: nema sljedećih u rasporedu")
 
@@ -774,16 +851,14 @@ class Streamer:
                         break
                     if self.played_today.get(key) == today:
                         break
-                    titles = expand_title_to_queue(item["title"])
-                    first = titles[0] if titles else item["title"]
-                    video = find_video(first)
-                    if video:
-                        self.queue = titles[1:]
+                    queue_paths = build_queue_for_item(item)
+                    if queue_paths:
+                        first = queue_paths[0]
+                        self.queue = queue_paths[1:]
                         self.queue_item = item
-                        # start_offset se primjenjuje samo na prvi video u queueu
-                        self._play(item, video, video_start=item.get("start_offset", 0))
+                        self._play(item, first, video_start=item.get("start_offset", 0))
                     else:
-                        log.warning(f"Video nije pronađen: {item['title']}")
+                        log.warning(f"Nema videa za stavku: {item.get('display_title') or item.get('title')}")
                     break
 
 
@@ -844,21 +919,54 @@ def parse_offset(s):
     raise ValueError(f"Neispravan format offseta: '{s}'. Koristi MM:SS ili HH:MM:SS.")
 
 
+def _when_label(date_str, weekday, time_str):
+    if date_str:
+        return f"jednom {date_str} u {time_str}"
+    if weekday is not None:
+        return f"svaki {WEEKDAY_NAMES[weekday]} u {time_str}"
+    return f"svaki dan u {time_str}"
+
+
 def cmd_add(args):
-    date_str, time_str = parse_time_arg(args.time)
+    date_str, weekday, time_str = parse_time_arg(args.time)
     display_title = args.title if not args.title_override else args.title_override
     start_offset = parse_offset(args.start) if args.start else 0
     schedule = load_schedule()
     entry = {"title": args.title, "display_title": display_title, "time": time_str, "date": date_str}
+    if weekday is not None:
+        entry["weekday"] = weekday
     if start_offset > 0:
         entry["start_offset"] = start_offset
     schedule.append(entry)
     save_schedule(schedule)
     offset_str = f"  (od {args.start})" if start_offset else ""
-    if date_str:
-        print(f"Dodano (jednom):    '{display_title}'  dana {date_str} u {time_str}{offset_str}")
-    else:
-        print(f"Dodano (svaki dan): '{display_title}'  svaki dan u {time_str}{offset_str}")
+    print(f"Dodano: '{display_title}'  {_when_label(date_str, weekday, time_str)}{offset_str}")
+
+
+def cmd_add_random(args):
+    date_str, weekday, time_str = parse_time_arg(args.time)
+    folders = [f.strip() for f in args.folders.split(",") if f.strip()]
+    if not folders:
+        print("Greška: navedi barem jedan folder.")
+        return
+    missing = [f for f in folders if not (VIDEOS_DIR / f).is_dir()]
+    if missing:
+        print(f"Upozorenje: folderi ne postoje u videos/: {', '.join(missing)}")
+    display_title = args.title_override or f"Random: {', '.join(folders)} ({args.length} min)"
+    schedule = load_schedule()
+    entry = {
+        "type": "random",
+        "folders": folders,
+        "length_minutes": int(args.length),
+        "display_title": display_title,
+        "time": time_str,
+        "date": date_str,
+    }
+    if weekday is not None:
+        entry["weekday"] = weekday
+    schedule.append(entry)
+    save_schedule(schedule)
+    print(f"Dodano (random): '{display_title}'  {_when_label(date_str, weekday, time_str)}")
 
 
 def cmd_list(_args):
@@ -874,39 +982,48 @@ def cmd_list(_args):
     for i, item in enumerate(schedule):
         u = upcoming_map.get(item_key(item))
         when = u["label"] if u else item.get("date", "?")
-        repeat = "svaki dan" if not item.get("date") else "jednom"
-        title = (item.get('display_title') or item['title'])[:40]
-        # Multi-video queue: sumiraj trajanja svih videa
-        titles = expand_title_to_queue(item["title"])
-        total_dur = 0.0
-        missing = False
-        for t in titles:
-            v = find_video(t)
-            if not v:
-                missing = True
-                continue
-            d = get_video_duration(v)
-            if d:
-                total_dur += d
+        if item.get("date"):
+            repeat = "jednom"
+        elif item.get("weekday") is not None:
+            repeat = WEEKDAY_NAMES[item["weekday"]]
+        else:
+            repeat = "svaki dan"
+        title = (item.get('display_title') or item.get('title') or "")[:40]
         duration_str = "?"
         end_str = "?"
-        if total_dur > 0:
-            mins = int(total_dur // 60)
-            secs = int(total_dur % 60)
-            duration_str = f"{mins}m {secs:02d}s"
-            if missing:
-                duration_str += "*"
-            if u:
-                end_dt = u["dt"] + datetime.timedelta(seconds=total_dur)
-                days = (end_dt.date() - now.date()).days
-                if days == 0:
-                    end_str = end_dt.strftime("%H:%M")
-                elif days == 1:
-                    end_str = f"Sutra {end_dt.strftime('%H:%M')}"
-                else:
-                    end_str = end_dt.strftime("%a %H:%M")
-        elif missing:
-            duration_str = "nema"
+        if item.get("type") == "random":
+            mins = int(item.get("length_minutes", 0))
+            duration_str = f"~{mins}m"
+            total_dur = mins * 60
+        else:
+            titles = expand_title_to_queue(item.get("title", ""))
+            total_dur = 0.0
+            missing = False
+            for t in titles:
+                v = find_video(t)
+                if not v:
+                    missing = True
+                    continue
+                d = get_video_duration(v)
+                if d:
+                    total_dur += d
+            if total_dur > 0:
+                mins = int(total_dur // 60)
+                secs = int(total_dur % 60)
+                duration_str = f"{mins}m {secs:02d}s"
+                if missing:
+                    duration_str += "*"
+            elif missing:
+                duration_str = "nema"
+        if total_dur > 0 and u:
+            end_dt = u["dt"] + datetime.timedelta(seconds=total_dur)
+            days = (end_dt.date() - now.date()).days
+            if days == 0:
+                end_str = end_dt.strftime("%H:%M")
+            elif days == 1:
+                end_str = f"Sutra {end_dt.strftime('%H:%M')}"
+            else:
+                end_str = end_dt.strftime("%a %H:%M")
         print(f"  {i:>3}   {when:<18}   {duration_str:<9}   {end_str:<11}   {repeat:<11}   {title}")
     print()
 
@@ -918,7 +1035,8 @@ def cmd_remove(args):
         return
     removed = schedule.pop(args.id)
     save_schedule(schedule)
-    print(f"Uklonjeno: '{removed['title']}'")
+    name = removed.get("display_title") or removed.get("title") or "(random)"
+    print(f"Uklonjeno: '{name}'")
 
 
 def cmd_image(args):
@@ -1044,6 +1162,14 @@ def main():
     pa.add_argument("--start", default=None, metavar="MM:SS",
                     help="Offset od početka videa (npr. 05:00 za petu minutu)")
 
+    par = sub.add_parser("add-random", help="Dodaj random sekvencu iz foldera (npr. 80 min)")
+    par.add_argument("folders", help="Folder ili više foldera odvojenih zarezom (npr. 'folder1, folder2')")
+    par.add_argument("time", help="HH:MM, today HH:MM, <dan> HH:MM ili YYYY-MM-DD HH:MM")
+    par.add_argument("--length", required=True, type=int, metavar="MIN",
+                    help="Trajanje u minutama (npr. 80)")
+    par.add_argument("--title", dest="title_override", default=None, metavar="NASLOV",
+                    help="Custom naslov za prikaz")
+
     pr = sub.add_parser("remove", help="Ukloni zakazani stream prema ID-u")
     pr.add_argument("id", type=int, help="ID iz 'stream list'")
 
@@ -1057,6 +1183,7 @@ def main():
         "status": cmd_status,
         "list":   cmd_list,
         "add":    cmd_add,
+        "add-random": cmd_add_random,
         "remove": cmd_remove,
         "image":  cmd_image,
         "skip":   cmd_skip,
