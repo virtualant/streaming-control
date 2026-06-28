@@ -771,7 +771,8 @@ class Streamer:
         seek = self._bg_seek()
         kill_ffmpeg(self.proc)
         cmd = build_video_cmd(self.config, video_path, seek, video_start=video_start)
-        log.info(f"Video '{item['title']}' ({video_path.name})  bg_seek={seek:.1f}s  start={video_start}s")
+        label = item.get('display_title') or item.get('title') or '(random)'
+        log.info(f"Video '{label}' ({video_path.name})  bg_seek={seek:.1f}s  start={video_start}s")
         self.proc = start_ffmpeg(cmd)
         self.mode = "video"
         self.playing_key = item_key(item)
