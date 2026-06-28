@@ -305,8 +305,11 @@ def expand_title_to_queue(title):
 
 # ── FFmpeg helpers ────────────────────────────────────────────────────────────
 
+_last_png_lines = None  # cache: prošli sadržaj PNG-a
+
 def render_schedule_png(schedule):
-    """Generiraj PNG s rasporedom koristeći Pillow — jeftinije od 7x drawtext u FFmPegu."""
+    """Generiraj PNG s rasporedom koristeći Pillow — samo ako se sadržaj promijenio."""
+    global _last_png_lines
     if not _PILLOW:
         return
     now = datetime.datetime.now()
@@ -317,12 +320,15 @@ def render_schedule_png(schedule):
     ]
 
     def fmt(u):
-        title = u['item'].get('display_title') or u['item']['title']
+        title = u['item'].get('display_title') or u['item'].get('title') or ''
         if len(title) > 90:
             title = title[:88] + ".."
         return f"{u['label']}  {title}"
 
     lines = [fmt(u) for u in upcoming]
+    if lines == _last_png_lines and SCHEDULE_PNG.exists():
+        return  # ništa nije novo — preskoči regeneraciju
+    _last_png_lines = lines
 
     # PNG u veličini cijelog platna — text lijevo, ostatak transparentan
     IMG_W, IMG_H = 1920, 1080
@@ -368,7 +374,7 @@ def write_overlay_files(schedule):
     ]
 
     def fmt(u):
-        title = u['item'].get('display_title') or u['item']['title']
+        title = u['item'].get('display_title') or u['item'].get('title') or ''
         if len(title) > 90:
             title = title[:88] + ".."
         return f"{u['label']}  {title}"
